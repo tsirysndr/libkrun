@@ -1871,14 +1871,24 @@ impl FileSystem for PassthroughFs {
             } else {
                 None
             };
-            set_stat(
+            if let Err(e) = set_stat(
                 &ctx,
                 self.cfg.semantics,
                 &ihandle,
                 Some(st),
                 Some((uid, gid)),
                 new_mode,
-            )?;
+            ) {
+                // Unprivileged server: we can never chown host files, but the
+                // guest (running as root) rightfully expects chown to work —
+                // dpkg/apt and GNU tar HARD-FAIL on EPERM, making package
+                // installs impossible on a virtio-fs root. Pretend it worked,
+                // like other unprivileged file-sharing stacks do.
+                let eperm = e.raw_os_error() == Some(libc::EPERM);
+                if !(eperm && unsafe { libc::geteuid() } != 0) {
+                    return Err(e);
+                }
+            }
         }
 
         if valid.contains(SetattrValid::SIZE) {
