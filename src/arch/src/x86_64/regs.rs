@@ -8,7 +8,7 @@
 use std::mem;
 
 use super::gdt::{gdt_entry, kvm_segment_from_gdt};
-use kvm_bindings::{kvm_fpu, kvm_regs, kvm_sregs};
+use kvm_bindings::{kvm_fpu, kvm_regs, kvm_segment, kvm_sregs};
 use kvm_ioctls::VcpuFd;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
@@ -137,9 +137,26 @@ pub fn setup_sregs_pvh(mem: &GuestMemoryMmap, vcpu: &VcpuFd) -> Result<()> {
         gdt_entry(0xc093, 0, 0xfffff), // 32-bit DATA
         gdt_entry(0x808b, 0, 0xfffff), // TSS
     ];
-    let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
-    let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
-    let tss_seg = kvm_segment_from_gdt(gdt_table[3], 3);
+    let mut code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
+    let mut data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+    let mut tss_seg = kvm_segment_from_gdt(gdt_table[3], 3);
+
+    // KVM's kvm_segment.limit is written straight into the VMCS/VMCB guest
+    // segment limit, which is BYTE-granular — the raw 20-bit descriptor limit
+    // must be expanded through the G bit. kvm_segment_from_gdt returns it raw
+    // (0xfffff), which the long-mode path gets away with because 64-bit mode
+    // ignores segment limits. In 32-bit protected mode it means a 1 MiB CS
+    // limit, so the first fetch at a PVH entry above 1 MiB (NetBSD MICROVM's
+    // is at ~2 MiB) takes #GP -> (minimal IDT) -> triple fault, zero
+    // instructions in. Expand to the intended 4 GiB flat limit.
+    fn expand_limit(seg: &mut kvm_segment) {
+        if seg.g != 0 {
+            seg.limit = (seg.limit << 12) | 0xfff;
+        }
+    }
+    expand_limit(&mut code_seg);
+    expand_limit(&mut data_seg);
+    expand_limit(&mut tss_seg);
 
     write_gdt_table(&gdt_table[..], mem)?;
     sregs.gdt.base = BOOT_GDT_OFFSET;
