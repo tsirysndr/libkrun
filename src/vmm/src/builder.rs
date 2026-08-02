@@ -1449,7 +1449,7 @@ fn load_payload(
                 false,
             ))
         }
-        Payload::Firmware => Ok((guest_mem, GuestAddress(arch::RESET_VECTOR), None, None)),
+        Payload::Firmware => Ok((guest_mem, GuestAddress(arch::RESET_VECTOR), None, None, false)),
     }
 }
 
