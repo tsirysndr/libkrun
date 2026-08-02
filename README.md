@@ -10,6 +10,11 @@
 
 It integrates a VMM (Virtual Machine Monitor, the userspace side of an Hypervisor) with the minimum amount of emulated devices required to its purpose, abstracting most of the complexity that comes from Virtual Machine management, offering users a simple C API.
 
+> [!NOTE]
+> **This fork (`feat/pvh-boot`, based on v1.19.4) adds x86_64 PVH direct boot** — used by
+> [bsdkrun](https://github.com/tsirysndr/bsdkrun) to boot **NetBSD/amd64** (its `MICROVM` kernel is
+> PVH-only) under libkrun on Linux/KVM. See [PVH boot (this fork)](#pvh-boot-this-fork) below.
+
 ## Use cases
 
 * [crun](https://github.com/containers/crun/blob/main/krun.1.md): Adding Virtualization-based isolation to container and confidential workloads.
@@ -55,6 +60,44 @@ Each variant generates a dynamic library with a different name (and ```soname```
 * virtio-balloon (only free-page reporting)
 * virtio-rng
 * virtio-snd
+
+## PVH boot (this fork)
+
+Upstream libkrun enters external x86_64 ELF kernels via the **Linux 64-bit boot
+protocol** only (a `boot_params` zero page in `%rsi`, jump to `e_entry` in long
+mode). Kernels that don't speak that protocol — e.g. **NetBSD's `MICROVM`
+kernel**, which boots via the
+[x86/HVM direct boot ABI (PVH)](https://xenbits.xen.org/docs/unstable/misc/pvh.html)
+— triple-fault on the first instruction.
+
+This fork adds a PVH boot path for external kernels:
+
+* `load_external_kernel` honors the ELF's Xen `PHYS32_ENTRY` note (already
+  parsed by `linux-loader` as `pvh_boot_cap`) and uses it as the entry point.
+* An `hvm_start_info` + E820-style memory map are written to low guest RAM
+  (`0x6000` / `0x7000`); `cmdline_paddr` points at the kernel command line at
+  `CMDLINE_START`, so the existing cmdline plumbing (including the
+  `virtio_mmio.device=` entries used for device discovery) works unchanged.
+* The boot vCPU enters in **32-bit protected mode, paging off** (flat 4 GiB
+  segments, TSS + IDT set, `%ebx` → start_info), per the PVH ABI.
+
+**Opt-in via `KRUN_PVH=1`**: the Linux vmlinux also carries a PVH note but must
+keep booting the Linux way, so PVH is only taken when the environment variable
+is set *and* the note is present. Without it, behavior is identical to upstream.
+
+The work also fixes a latent bug inherited from Firecracker's `gdt.rs`:
+`kvm_segment_from_gdt` returns the **raw 20-bit** descriptor limit, but
+`kvm_segment.limit` feeds the byte-granular VMCS/VMCB guest segment limit — so
+a "flat 4 GiB" segment was really **1 MiB**. Long mode never noticed (segment
+limits are ignored there); in 32-bit protected mode it made any entry point
+above 1 MiB `#GP` on the very first instruction fetch. The PVH path expands
+limits through the G bit, as Cloud Hypervisor does.
+
+Verified end-to-end by [bsdkrun's KVM CI](https://github.com/tsirysndr/bsdkrun/blob/main/.github/workflows/e2e-linux.yml):
+NetBSD/amd64 `MICROVM` boots to multiuser with virtio-mmio block/net (kernel
+cmdline: `root=ld0a console=com` — `console=com` is required, since a PVH boot
+passes no NetBSD bootinfo and the console would otherwise default to VGA).
+See [PVH_PATCH_SKETCH.md](PVH_PATCH_SKETCH.md) for the design notes.
 
 ## Networking
 
