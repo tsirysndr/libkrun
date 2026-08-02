@@ -1,0 +1,37 @@
+name: nix
+
+# Build the PVH fork's libkrun through the Nix flake and push the result to
+# the `bsdkrun` Cachix cache, so consumers (bsdkrun's flake depends on this
+# one on Linux) get substituted binaries instead of rebuilding the fork.
+
+on:
+  push:
+    branches: ["feat/pvh-boot"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: nix · ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: bsdkrun
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: nix build
+        run: nix build -L .#libkrun
