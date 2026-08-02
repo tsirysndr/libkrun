@@ -1,0 +1,82 @@
+name: release
+
+# Build the PVH fork's libkrun natively on both Linux arches and attach the
+# tarballs to a GitHub release. Runs on version tags (e.g. v1.19.4-pvh1).
+#
+# Deliberately a plain `make` build against the system toolchain — NOT nix —
+# so the resulting libkrun.so links the distro glibc and works on any regular
+# Linux host (a nix-built .so carries /nix/store RUNPATHs). libkrunfw is NOT
+# needed at build time (libkrun dlopens libkrunfw.so.5 at runtime).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  build:
+    name: release · ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Same toolchain set bsdkrun's e2e uses to build this fork (minus the
+      # libkrunfw kernel-build deps — flex/bison/bc/libelf are only needed to
+      # compile libkrunfw, which we don't ship here): clang/libclang for the
+      # bindgen-based crates, the rest for the init blob.
+      - name: Install build deps
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config patchelf clang libclang-dev llvm-dev
+
+      # The same invocation bsdkrun's e2e-linux.yml uses (BLK/NET are what its
+      # guests ride on).
+      - name: Build (BLK=1 NET=1)
+        run: make -j"$(nproc)" BLK=1 NET=1 PREFIX=/usr/local
+
+      # Stage a PREFIX=/usr/local install and tar its contents, so the archive
+      # extracts cleanly into /usr/local (lib64/, include/, pkgconfig).
+      - name: Package
+        run: |
+          set -eux
+          make install BLK=1 NET=1 PREFIX=/usr/local DESTDIR="$PWD/staging"
+          TAG="${GITHUB_REF_NAME}"
+          NAME="libkrun-pvh-${TAG}-${{ matrix.arch }}-unknown-linux-gnu"
+          mkdir -p dist
+          tar -C staging/usr/local -czf "dist/${NAME}.tar.gz" .
+          ( cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
+          ls -lh dist
+
+      # Always expose the build as workflow artifacts (handy for manual runs).
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libkrun-pvh-${{ matrix.arch }}
+          path: dist/*
+
+      # On a version tag, create/update the GitHub release with the assets
+      # (both matrix jobs upload into the same release).
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
