@@ -281,6 +281,12 @@ impl Vmm {
             if _pvh {
                 // PVH boot: write the hvm_start_info + memmap instead of the Linux
                 // zero page. The cmdline is already at CMDLINE_START (load_cmdline).
+                // Also write an MPTable: non-ACPI PVH kernels (e.g. FreeBSD's
+                // FIRECRACKER config) enumerate CPUs/APIC through it. NetBSD's
+                // MICROVM ignores it (it reads CPU info from PVH), so it's harmless.
+                #[cfg(not(feature = "tee"))]
+                arch::x86_64::mptable::setup_mptable(&self.guest_memory, vcpus.len() as u8)
+                    .map_err(|e| Error::ConfigureSystem(arch::x86_64::Error::MpTableSetup(e)))?;
                 arch::x86_64::pvh::configure_pvh(&self.guest_memory)
                     .map_err(|_| Error::ConfigureSystem(arch::x86_64::Error::ZeroPageSetup))?;
             } else {

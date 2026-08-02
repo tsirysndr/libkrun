@@ -11,7 +11,7 @@ pub mod interrupts;
 /// Layout for the x86_64 system.
 pub mod layout;
 #[cfg(not(feature = "tee"))]
-mod mptable;
+pub mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
 pub mod msr;
 /// PVH boot (x86/HVM direct boot ABI): hvm_start_info + memmap in guest RAM.
