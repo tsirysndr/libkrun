@@ -1283,7 +1283,17 @@ fn load_external_kernel(
         _ => return Err(StartMicrovmError::KernelFormatUnsupported),
     };
 
-    debug!("load_external_kernel: 0x{:x}", entry_addr.0);
+    debug!("load_external_kernel: 0x{:x} (pvh={is_pvh})", entry_addr.0);
+    // Confirm the kernel bytes actually landed at the entry in guest memory. For a
+    // PVH kernel this should be the PHYS32_ENTRY code (NetBSD MICROVM starts with
+    // 0f 31 = rdtsc); all-zero means the ELF didn't load to low physical memory.
+    {
+        let mut probe = [0u8; 16];
+        match guest_mem.read(&mut probe[..], entry_addr) {
+            Ok(_) => debug!("entry bytes @ 0x{:x}: {:02x?}", entry_addr.0, probe),
+            Err(e) => debug!("entry bytes @ 0x{:x}: unreadable ({e:?})", entry_addr.0),
+        }
+    }
 
     let initrd_config = if let Some(initramfs_path) = &external_kernel.initramfs_path {
         let data = std::fs::read(initramfs_path).map_err(StartMicrovmError::InitrdRead)?;
