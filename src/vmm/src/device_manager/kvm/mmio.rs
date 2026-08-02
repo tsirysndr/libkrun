@@ -77,8 +77,10 @@ type Result<T> = ::std::result::Result<T, Error>;
 /// Currently hardcoded to 4K.
 const MMIO_LEN: u64 = 0x1000;
 
-/// Per-VM counter for FreeBSD `hint.virtio_mmio.<n>.*` device-hint indices (one
-/// VM per process, so a process-global counter is fine).
+/// Per-VM counter for FreeBSD's numbered `virtio_mmio.device_<n>=` cmdline keys
+/// (one VM per process, so a process-global counter is fine). x86_64-only, like
+/// `add_device_to_cmdline` — its sole user.
+#[cfg(target_arch = "x86_64")]
 static FREEBSD_HINT_IDX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Manages the complexities of registering a MMIO device.

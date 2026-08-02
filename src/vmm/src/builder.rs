@@ -1146,6 +1146,8 @@ fn load_external_kernel(
 > {
     // Set when the ELF advertises a PVH PHYS32_ENTRY note: boot via the x86/HVM
     // direct boot ABI (32-bit protected mode) instead of the Linux 64-bit protocol.
+    // Only ever assigned on x86_64 (PVH is an x86 ABI), hence the cfg_attr.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
     let mut is_pvh = false;
     let entry_addr = match external_kernel.format {
         // Raw images are treated as bundled kernels on x86_64

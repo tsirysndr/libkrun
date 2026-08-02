@@ -1598,21 +1598,26 @@ impl Vcpu {
                     // Dump the vcpu state so a triple-fault (e.g. a bad PVH entry
                     // state) is debuggable: rip tells us if it faulted on the first
                     // instruction vs later, cr0/cr2/cr3/efer show the CPU mode.
-                    if let Ok(regs) = self.fd.get_regs() {
-                        error!(
-                            "SHUTDOWN vcpu regs: rip={:#x} rsp={:#x} rbx={:#x} rax={:#x} rflags={:#x}",
-                            regs.rip, regs.rsp, regs.rbx, regs.rax, regs.rflags
-                        );
-                    }
-                    if let Ok(s) = self.fd.get_sregs() {
-                        error!(
-                            "SHUTDOWN vcpu sregs: cr0={:#x} cr2={:#x} cr3={:#x} cr4={:#x} efer={:#x} \
-                             cs.base={:#x} cs.limit={:#x} cs.db={} cs.l={} cs.g={} cs.present={} \
-                             gdt.base={:#x} gdt.limit={:#x} tr.type={} tr.present={}",
-                            s.cr0, s.cr2, s.cr3, s.cr4, s.efer,
-                            s.cs.base, s.cs.limit, s.cs.db, s.cs.l, s.cs.g, s.cs.present,
-                            s.gdt.base, s.gdt.limit, s.tr.type_, s.tr.present
-                        );
+                    // x86_64-only: KVM_GET_(S)REGS are x86 ioctls — kvm-ioctls
+                    // doesn't even define get_regs/get_sregs on aarch64.
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        if let Ok(regs) = self.fd.get_regs() {
+                            error!(
+                                "SHUTDOWN vcpu regs: rip={:#x} rsp={:#x} rbx={:#x} rax={:#x} rflags={:#x}",
+                                regs.rip, regs.rsp, regs.rbx, regs.rax, regs.rflags
+                            );
+                        }
+                        if let Ok(s) = self.fd.get_sregs() {
+                            error!(
+                                "SHUTDOWN vcpu sregs: cr0={:#x} cr2={:#x} cr3={:#x} cr4={:#x} efer={:#x} \
+                                 cs.base={:#x} cs.limit={:#x} cs.db={} cs.l={} cs.g={} cs.present={} \
+                                 gdt.base={:#x} gdt.limit={:#x} tr.type={} tr.present={}",
+                                s.cr0, s.cr2, s.cr3, s.cr4, s.efer,
+                                s.cs.base, s.cs.limit, s.cs.db, s.cs.l, s.cs.g, s.cs.present,
+                                s.gdt.base, s.gdt.limit, s.tr.type_, s.tr.present
+                            );
+                        }
                     }
                     Ok(VcpuEmulation::Stopped)
                 }
