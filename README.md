@@ -12,8 +12,9 @@ It integrates a VMM (Virtual Machine Monitor, the userspace side of an Hyperviso
 
 > [!NOTE]
 > **This fork (`feat/pvh-boot`, based on v1.19.4) adds x86_64 PVH direct boot** — used by
-> [bsdkrun](https://github.com/tsirysndr/bsdkrun) to boot **NetBSD/amd64** (its `MICROVM` kernel is
-> PVH-only) under libkrun on Linux/KVM. See [PVH boot (this fork)](#pvh-boot-this-fork) below.
+> [bsdkrun](https://github.com/tsirysndr/bsdkrun) to boot **NetBSD/amd64** (`MICROVM` kernel) and
+> **FreeBSD/amd64** (`FIRECRACKER` kernel) under libkrun on Linux/KVM; both are PVH-only.
+> See [PVH boot (this fork)](#pvh-boot-this-fork) below.
 
 ## Use cases
 
@@ -93,10 +94,37 @@ limits are ignored there); in 32-bit protected mode it made any entry point
 above 1 MiB `#GP` on the very first instruction fetch. The PVH path expands
 limits through the G bit, as Cloud Hypervisor does.
 
+### FreeBSD support
+
+Beyond the PVH entry itself, FreeBSD's `FIRECRACKER` kernel (its firecracker-class
+config: no ACPI, legacy enumeration, virtio-mmio built in) needs three more things
+this fork provides on the PVH path:
+
+* **MPTable** — with no ACPI, FreeBSD enumerates CPUs/APICs from the legacy Intel
+  MPTable (`options MPTABLE_LINUX_BUG_COMPAT`), which upstream libkrun only wrote
+  for the Linux boot path. The PVH path now writes it too.
+* **TSC frequency via CPUID leaf `0x40000010`** — FreeBSD can't calibrate its TSC
+  under libkrun: with `machdep.disable_tsc_calibration` (the FIRECRACKER default)
+  `tsc_freq` stays 0 and `lapic_init` panics, and with calibration on, PVH's
+  `DELAY` is `xen_delay`, which faults on a Xen pvclock KVM never provides. The
+  fork synthesizes the generic hypervisor TSC leaf (`tsc_freq_cpuid_vm()`: eax =
+  kHz, max-leaf bumped to cover it) from `KVM_GET_TSC_KHZ`, as QEMU and
+  Firecracker do — FreeBSD then skips calibration entirely.
+* **Numbered `virtio_mmio.device_N=` cmdline keys** — FreeBSD's discovery
+  (`virtio_mmio_cmdline.c`) reads `virtio_mmio.device=<size>@<addr>:<irq>` plus
+  `virtio_mmio.device_1=`, `_2=`, ... for additional devices; it can't see
+  Linux's repeated-key form (its kernel environment hides duplicate keys).
+  Opt-in via `KRUN_VIRTIO_MMIO_HINTS=freebsd`.
+
 Verified end-to-end by [bsdkrun's KVM CI](https://github.com/tsirysndr/bsdkrun/blob/main/.github/workflows/e2e-linux.yml):
-NetBSD/amd64 `MICROVM` boots to multiuser with virtio-mmio block/net (kernel
-cmdline: `root=ld0a console=com` — `console=com` is required, since a PVH boot
-passes no NetBSD bootinfo and the console would otherwise default to VGA).
+
+* **NetBSD/amd64 `MICROVM`** boots to multiuser with virtio-mmio block/net (kernel
+  cmdline: `root=ld0a console=com` — `console=com` is required, since a PVH boot
+  passes no NetBSD bootinfo and the console would otherwise default to VGA).
+* **FreeBSD/amd64 `FIRECRACKER`** (15.1) boots to multiuser with virtio-mmio
+  block/net, rooting on `ufs:/dev/vtbd0` with the console on the 16550 at `0x3f8`
+  (`console=comconsole hw.uart.console=io:0x3f8`).
+
 See [PVH_PATCH_SKETCH.md](PVH_PATCH_SKETCH.md) for the design notes.
 
 ## Networking
