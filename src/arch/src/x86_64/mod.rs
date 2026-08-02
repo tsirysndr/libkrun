@@ -14,6 +14,8 @@ pub mod layout;
 mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
 pub mod msr;
+/// PVH boot (x86/HVM direct boot ABI): hvm_start_info + memmap in guest RAM.
+pub mod pvh;
 /// Logic for configuring x86_64 registers.
 pub mod regs;
 

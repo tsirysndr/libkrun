@@ -108,6 +108,54 @@ pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &VcpuFd, id: u8) -> Result<()> {
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
 
+/// PVH boot regs (x86/HVM direct boot ABI): entry in `%eip`, the `hvm_start_info`
+/// physical address in `%ebx`. Interrupts + direction flag are cleared (rflags
+/// has only the reserved bit set).
+pub fn setup_regs_pvh(vcpu: &VcpuFd, entry: u64, start_info: u64) -> Result<()> {
+    let regs = kvm_regs {
+        rflags: 0x0000_0000_0000_0002u64,
+        rip: entry,
+        rbx: start_info,
+        ..Default::default()
+    };
+    vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
+}
+
+/// PVH sregs: 32-bit protected mode, flat 4 GiB segments, **paging and long mode
+/// off** — the state the PVH entry point expects. Contrast `setup_sregs`, which
+/// sets up 64-bit long mode + identity paging for the Linux protocol.
+pub fn setup_sregs_pvh(mem: &GuestMemoryMmap, vcpu: &VcpuFd) -> Result<()> {
+    let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
+
+    // 0xc0** access bytes: DB=1 (32-bit) + G=1, base 0, limit 0xfffff (×4K = 4G).
+    // (The Linux path above uses 0xa0** — L=1, 64-bit.)
+    let gdt_table: [u64; 3] = [
+        gdt_entry(0, 0, 0),            // NULL
+        gdt_entry(0xc09b, 0, 0xfffff), // 32-bit CODE
+        gdt_entry(0xc093, 0, 0xfffff), // 32-bit DATA
+    ];
+    let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
+    let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+
+    write_gdt_table(&gdt_table[..], mem)?;
+    sregs.gdt.base = BOOT_GDT_OFFSET;
+    sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
+
+    sregs.cs = code_seg;
+    sregs.ds = data_seg;
+    sregs.es = data_seg;
+    sregs.fs = data_seg;
+    sregs.gs = data_seg;
+    sregs.ss = data_seg;
+
+    // Protected mode ON; paging (PG/PAE) and long mode (LME/LMA) OFF.
+    sregs.cr0 = X86_CR0_PE;
+    sregs.cr4 = 0;
+    sregs.efer = 0;
+
+    vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
+}
+
 const BOOT_GDT_OFFSET: u64 = 0x500;
 const BOOT_IDT_OFFSET: u64 = 0x520;
 

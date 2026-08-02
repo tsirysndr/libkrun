@@ -34,6 +34,13 @@ pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
 /// The 'zero page', a.k.a linux kernel bootparams.
 pub const ZERO_PAGE_START: u64 = 0x7000;
 
+/// PVH boot (x86/HVM direct boot ABI): the `hvm_start_info` struct and its
+/// E820-style memory-map table, placed in low RAM below the kernel — the PVH
+/// analogue of the Linux zero page. Used only when booting an external kernel
+/// that advertises a PVH `PHYS32_ENTRY` note (e.g. NetBSD's MICROVM kernel).
+pub const PVH_INFO_START: u64 = 0x6000;
+pub const PVH_MEMMAP_START: u64 = 0x7000; // reuses the (PVH-unused) zero-page slot
+
 /// SNP: space for the initial LIDT
 pub const SNP_LIDT_START: u64 = 0x0;
 /// SNP: Secrets page.
