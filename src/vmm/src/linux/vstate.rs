@@ -1214,6 +1214,25 @@ impl Vcpu {
                 .map_err(Error::REGSConfiguration)?;
                 arch::x86_64::regs::setup_sregs_pvh(guest_mem, &self.fd)
                     .map_err(Error::SREGSConfiguration)?;
+                // Read the state back to confirm KVM actually applied the PVH entry
+                // (deterministic, unlike the racy post-triple-fault shutdown dump).
+                if let (Ok(r), Ok(s)) = (self.fd.get_regs(), self.fd.get_sregs()) {
+                    error!(
+                        "PVH configured vcpu{}: rip={:#x} rbx={:#x} rflags={:#x} cr0={:#x} \
+                         efer={:#x} cs.base={:#x} cs.limit={:#x} cs.db={} cs.g={} tr.type={}",
+                        self.id,
+                        r.rip,
+                        r.rbx,
+                        r.rflags,
+                        s.cr0,
+                        s.efer,
+                        s.cs.base,
+                        s.cs.limit,
+                        s.cs.db,
+                        s.cs.g,
+                        s.tr.type_
+                    );
+                }
             } else {
                 // Linux 64-bit boot protocol: long mode + zero page in %rsi.
                 arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.raw_value(), self.id)
