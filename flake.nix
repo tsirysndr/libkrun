@@ -1,6 +1,15 @@
 {
   description = "libkrun with x86_64 PVH direct boot (feat/pvh-boot fork) — boots NetBSD/FreeBSD amd64 microVMs";
 
+  # CI (.github/workflows/nix.yml) builds every push of this branch and pushes
+  # the result here — declare the cache so consumers substitute instead of
+  # compiling (nix asks once to trust it).
+  nixConfig = {
+    extra-substituters = [ "https://bsdkrun.cachix.org" ];
+    extra-trusted-public-keys =
+      [ "bsdkrun.cachix.org-1:KzvN59TR6k15k7Fl7SxTEhxJnE0MvbxLC2HpxdVlC9Q=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
@@ -24,7 +33,18 @@
         libkrun = pkgs.libkrun.overrideAttrs (old: {
           pname = "libkrun-pvh";
           version = "1.19.4-pvh";
-          src = self;
+          # Filter docs/CI/flake files out of the source so commits that only
+          # touch them don't change the derivation — otherwise every push
+          # (src = self) would invalidate the Cachix cache for consumers.
+          src = nixpkgs.lib.cleanSourceWith {
+            name = "libkrun-pvh-src";
+            src = self;
+            filter = path: _type:
+              let base = baseNameOf path;
+              in
+              !(base == ".github" || base == "flake.nix" || base == "flake.lock"
+                || nixpkgs.lib.hasSuffix ".md" base);
+          };
           cargoDeps = pkgs.rustPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
           };
