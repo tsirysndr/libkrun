@@ -77,6 +77,10 @@ type Result<T> = ::std::result::Result<T, Error>;
 /// Currently hardcoded to 4K.
 const MMIO_LEN: u64 = 0x1000;
 
+/// Per-VM counter for FreeBSD `hint.virtio_mmio.<n>.*` device-hint indices (one
+/// VM per process, so a process-global counter is fine).
+static FREEBSD_HINT_IDX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Manages the complexities of registering a MMIO device.
 pub struct MMIODeviceManager {
     pub bus: devices::Bus,
@@ -170,6 +174,33 @@ impl MMIODeviceManager {
         mmio_base: u64,
         irq: u32,
     ) -> Result<()> {
+        // FreeBSD's virtio-mmio driver doesn't parse the Linux `virtio_mmio.device=`
+        // format — it attaches to nexus0 via newbus device hints, which it reads
+        // from the PVH cmdline (parsed as the kernel environment). Emit those hints
+        // instead when asked (KRUN_VIRTIO_MMIO_HINTS=freebsd). NetBSD and Linux both
+        // understand the default `virtio_mmio.device=` form, so this is opt-in.
+        if std::env::var("KRUN_VIRTIO_MMIO_HINTS").as_deref() == Ok("freebsd") {
+            let n = FREEBSD_HINT_IDX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            cmdline
+                .insert(format!("hint.virtio_mmio.{n}.at"), "nexus0".to_string())
+                .map_err(Error::Cmdline)?;
+            cmdline
+                .insert(
+                    format!("hint.virtio_mmio.{n}.maddr"),
+                    format!("0x{mmio_base:x}"),
+                )
+                .map_err(Error::Cmdline)?;
+            cmdline
+                .insert(
+                    format!("hint.virtio_mmio.{n}.msize"),
+                    format!("0x{MMIO_LEN:x}"),
+                )
+                .map_err(Error::Cmdline)?;
+            return cmdline
+                .insert(format!("hint.virtio_mmio.{n}.irq"), format!("{irq}"))
+                .map_err(Error::Cmdline);
+        }
+
         // as per doc, [virtio_mmio.]device=<size>@<baseaddr>:<irq> needs to be appended
         // to kernel commandline for virtio mmio devices to get recognized
         // the size parameter has to be transformed to KiB, so dividing hexadecimal value in
