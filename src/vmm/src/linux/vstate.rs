@@ -45,7 +45,8 @@ use cpuid::{c3, filter_cpuid, t2, VmSpec};
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
     kvm_clock_data, kvm_debugregs, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_pit_state2,
-    kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, CpuId, MsrList, Msrs,
+    kvm_cpuid_entry2, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, CpuId, MsrList,
+    Msrs,
     KVM_CLOCK_TSC_STABLE, KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
     KVM_MAX_CPUID_ENTRIES,
 };
@@ -1193,6 +1194,49 @@ impl Vcpu {
                 CpuFeaturesTemplate::C3 => {
                     c3::set_cpuid_entries(&mut self.cpuid, &cpuid_vm_spec).map_err(Error::CpuId)?
                 }
+            }
+        }
+
+        // FreeBSD's PVH boot (FIRECRACKER kernel) can't work out its TSC
+        // frequency under libkrun on its own: with calibration disabled tsc_freq
+        // stays 0 and lapic_init panics "TSC not initialized"; with calibration
+        // on, its PVH DELAY is xen_delay, which reads a Xen pvclock KVM never
+        // sets up -> a page fault in pvclock_get_timecount. The escape hatch
+        // FreeBSD offers (and that QEMU/Firecracker use) is CPUID leaf
+        // 0x40000010: tsc_freq_cpuid_vm() reads eax as the TSC frequency in kHz,
+        // but only when the hypervisor max-leaf (0x40000000.eax) is >= 0x40000010.
+        // KVM_GET_SUPPORTED_CPUID doesn't include that leaf, so synthesize it
+        // from KVM_GET_TSC_KHZ. Gated on `pvh` to leave the Linux boot untouched.
+        if pvh {
+            match self.fd.get_tsc_khz() {
+                Ok(tsc_khz) => {
+                    for entry in self.cpuid.as_mut_slice().iter_mut() {
+                        if entry.function == 0x4000_0000 && entry.eax < 0x4000_0010 {
+                            entry.eax = 0x4000_0010;
+                        }
+                    }
+                    self.cpuid.retain(|entry| entry.function != 0x4000_0010);
+                    match self.cpuid.push(kvm_cpuid_entry2 {
+                        function: 0x4000_0010,
+                        index: 0,
+                        flags: 0,
+                        eax: tsc_khz,
+                        ebx: 0,
+                        ecx: 0,
+                        edx: 0,
+                        padding: [0, 0, 0],
+                    }) {
+                        Ok(()) => info!(
+                            "PVH: advertised TSC freq {tsc_khz} kHz via CPUID leaf 0x40000010"
+                        ),
+                        Err(e) => error!(
+                            "PVH: could not add TSC-freq CPUID leaf 0x40000010: {e:?}"
+                        ),
+                    }
+                }
+                Err(e) => error!(
+                    "PVH: KVM_GET_TSC_KHZ failed ({e:?}); FreeBSD guests may panic in TSC init"
+                ),
             }
         }
 
