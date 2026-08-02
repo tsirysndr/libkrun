@@ -10,7 +10,9 @@
 //! pointing at the `hvm_start_info` at [`layout::PVH_INFO_START`] (see
 //! `regs::setup_regs_pvh` / `regs::setup_sregs_pvh`).
 
-use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
+use vm_memory::{
+    Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 use super::layout::{CMDLINE_START, PVH_INFO_START, PVH_MEMMAP_START};
 
@@ -50,7 +52,6 @@ pub struct hvm_memmap_table_entry {
 // Safe: POD of integers.
 unsafe impl ByteValued for hvm_memmap_table_entry {}
 
-#[derive(Debug)]
 /// Write the E820-style memory map (from the guest RAM regions) followed by the
 /// `hvm_start_info` at the fixed layout addresses. The kernel cmdline is expected
 /// to already be at [`CMDLINE_START`] (libkrun's `load_cmdline` writes it there).

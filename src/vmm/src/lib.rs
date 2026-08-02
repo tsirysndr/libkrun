@@ -277,27 +277,29 @@ impl Vmm {
         _pvh: bool,
     ) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
-        if _pvh {
-            // PVH boot: write the hvm_start_info + memmap instead of the Linux zero
-            // page. The cmdline is already at CMDLINE_START (via load_cmdline).
-            arch::x86_64::pvh::configure_pvh(&self.guest_memory)
-                .map_err(|_| Error::ConfigureSystem(arch::x86_64::Error::ZeroPageSetup))?;
-        } else {
-            let cmdline_len = if cfg!(feature = "tee") {
-                arch::x86_64::layout::CMDLINE_SEV_SIZE
+        {
+            if _pvh {
+                // PVH boot: write the hvm_start_info + memmap instead of the Linux
+                // zero page. The cmdline is already at CMDLINE_START (load_cmdline).
+                arch::x86_64::pvh::configure_pvh(&self.guest_memory)
+                    .map_err(|_| Error::ConfigureSystem(arch::x86_64::Error::ZeroPageSetup))?;
             } else {
-                self.kernel_cmdline.len() + 1
-            };
+                let cmdline_len = if cfg!(feature = "tee") {
+                    arch::x86_64::layout::CMDLINE_SEV_SIZE
+                } else {
+                    self.kernel_cmdline.len() + 1
+                };
 
-            arch::x86_64::configure_system(
-                &self.guest_memory,
-                &self.arch_memory_info,
-                vm_memory::GuestAddress(arch::x86_64::layout::CMDLINE_START),
-                cmdline_len,
-                initrd,
-                vcpus.len() as u8,
-            )
-            .map_err(Error::ConfigureSystem)?;
+                arch::x86_64::configure_system(
+                    &self.guest_memory,
+                    &self.arch_memory_info,
+                    vm_memory::GuestAddress(arch::x86_64::layout::CMDLINE_START),
+                    cmdline_len,
+                    initrd,
+                    vcpus.len() as u8,
+                )
+                .map_err(Error::ConfigureSystem)?;
+            }
         }
 
         #[cfg(target_arch = "aarch64")]
