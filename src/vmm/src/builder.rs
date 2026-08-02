@@ -1167,11 +1167,15 @@ fn load_external_kernel(
                 .map_err(StartMicrovmError::ElfOpenKernel)?;
             let load_result = loader::Elf::load(guest_mem, None, &mut file, None)
                 .map_err(StartMicrovmError::ElfLoadKernel)?;
-            // Prefer PVH: if the kernel exposes a PHYS32_ENTRY note, enter there in
-            // 32-bit protected mode (e.g. NetBSD MICROVM) instead of e_entry + the
-            // Linux zero page.
+            // PVH is opt-in via KRUN_PVH=1: if the kernel exposes a PHYS32_ENTRY
+            // note AND PVH was requested, enter there in 32-bit protected mode
+            // (e.g. NetBSD MICROVM). Otherwise use e_entry + the Linux zero page —
+            // Linux's vmlinux also carries a PVH note but boots fine the Linux way,
+            // so we must NOT hijack it.
             match load_result.pvh_boot_cap {
-                loader::elf::PvhBootCapability::PvhEntryPresent(addr) => {
+                loader::elf::PvhBootCapability::PvhEntryPresent(addr)
+                    if std::env::var_os("KRUN_PVH").is_some() =>
+                {
                     is_pvh = true;
                     addr
                 }
@@ -1449,7 +1453,13 @@ fn load_payload(
                 false,
             ))
         }
-        Payload::Firmware => Ok((guest_mem, GuestAddress(arch::RESET_VECTOR), None, None, false)),
+        Payload::Firmware => Ok((
+            guest_mem,
+            GuestAddress(arch::RESET_VECTOR),
+            None,
+            None,
+            false,
+        )),
     }
 }
 

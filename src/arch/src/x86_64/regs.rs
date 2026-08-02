@@ -128,18 +128,26 @@ pub fn setup_sregs_pvh(mem: &GuestMemoryMmap, vcpu: &VcpuFd) -> Result<()> {
     let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
 
     // 0xc0** access bytes: DB=1 (32-bit) + G=1, base 0, limit 0xfffff (×4K = 4G).
-    // (The Linux path above uses 0xa0** — L=1, 64-bit.)
-    let gdt_table: [u64; 3] = [
+    // (The Linux path above uses 0xa0** — L=1, 64-bit.) A TSS descriptor is
+    // included and loaded into TR: KVM needs a valid task register for VM entry,
+    // and the real-mode TR left over from reset triple-faults in protected mode.
+    let gdt_table: [u64; BOOT_GDT_MAX] = [
         gdt_entry(0, 0, 0),            // NULL
         gdt_entry(0xc09b, 0, 0xfffff), // 32-bit CODE
         gdt_entry(0xc093, 0, 0xfffff), // 32-bit DATA
+        gdt_entry(0x808b, 0, 0xfffff), // TSS
     ];
     let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
     let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+    let tss_seg = kvm_segment_from_gdt(gdt_table[3], 3);
 
     write_gdt_table(&gdt_table[..], mem)?;
     sregs.gdt.base = BOOT_GDT_OFFSET;
     sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
+
+    write_idt_value(0, mem)?;
+    sregs.idt.base = BOOT_IDT_OFFSET;
+    sregs.idt.limit = mem::size_of::<u64>() as u16 - 1;
 
     sregs.cs = code_seg;
     sregs.ds = data_seg;
@@ -147,11 +155,13 @@ pub fn setup_sregs_pvh(mem: &GuestMemoryMmap, vcpu: &VcpuFd) -> Result<()> {
     sregs.fs = data_seg;
     sregs.gs = data_seg;
     sregs.ss = data_seg;
+    sregs.tr = tss_seg;
 
-    // Protected mode ON; paging (PG/PAE) and long mode (LME/LMA) OFF.
-    sregs.cr0 = X86_CR0_PE;
-    sregs.cr4 = 0;
-    sregs.efer = 0;
+    // Protected mode ON; paging (PG/PAE) and long mode (LME/LMA) OFF. Preserve the
+    // other reset bits of cr0 (e.g. ET) rather than clobbering the whole register.
+    sregs.cr0 = (sregs.cr0 | X86_CR0_PE) & !X86_CR0_PG;
+    sregs.cr4 &= !X86_CR4_PAE;
+    sregs.efer &= !(EFER_LME | EFER_LMA);
 
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
