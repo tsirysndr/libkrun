@@ -174,30 +174,23 @@ impl MMIODeviceManager {
         mmio_base: u64,
         irq: u32,
     ) -> Result<()> {
-        // FreeBSD's virtio-mmio driver doesn't parse the Linux `virtio_mmio.device=`
-        // format — it attaches to nexus0 via newbus device hints, which it reads
-        // from the PVH cmdline (parsed as the kernel environment). Emit those hints
-        // instead when asked (KRUN_VIRTIO_MMIO_HINTS=freebsd). NetBSD and Linux both
-        // understand the default `virtio_mmio.device=` form, so this is opt-in.
+        // FreeBSD can't read the Linux form of `virtio_mmio.device=`: Linux repeats
+        // the key once per device, but FreeBSD parses the cmdline into its kernel
+        // environment, where duplicate keys hide everything past the first. Its
+        // parser (virtio_mmio_cmdline.c, the FIRECRACKER kernel's discovery path)
+        // instead wants numbered keys: `virtio_mmio.device=<size>@<addr>:<irq>`
+        // for the first device, then `virtio_mmio.device_1=`, `_2=`, ... — the
+        // value syntax itself matches Linux. Emit that scheme when asked
+        // (KRUN_VIRTIO_MMIO_HINTS=freebsd); NetBSD and Linux keep the default.
         if std::env::var("KRUN_VIRTIO_MMIO_HINTS").as_deref() == Ok("freebsd") {
             let n = FREEBSD_HINT_IDX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            cmdline
-                .insert(format!("hint.virtio_mmio.{n}.at"), "nexus0".to_string())
-                .map_err(Error::Cmdline)?;
-            cmdline
-                .insert(
-                    format!("hint.virtio_mmio.{n}.maddr"),
-                    format!("0x{mmio_base:x}"),
-                )
-                .map_err(Error::Cmdline)?;
-            cmdline
-                .insert(
-                    format!("hint.virtio_mmio.{n}.msize"),
-                    format!("0x{MMIO_LEN:x}"),
-                )
-                .map_err(Error::Cmdline)?;
+            let key = if n == 0 {
+                "virtio_mmio.device".to_string()
+            } else {
+                format!("virtio_mmio.device_{n}")
+            };
             return cmdline
-                .insert(format!("hint.virtio_mmio.{n}.irq"), format!("{irq}"))
+                .insert(key, format!("{}K@0x{:08x}:{}", MMIO_LEN / 1024, mmio_base, irq))
                 .map_err(Error::Cmdline);
         }
 
