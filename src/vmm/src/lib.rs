@@ -274,9 +274,15 @@ impl Vmm {
         _intc: &IrqChip,
         initrd: &Option<InitrdConfig>,
         _smbios_oem_strings: &Option<Vec<String>>,
+        _pvh: bool,
     ) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
-        {
+        if _pvh {
+            // PVH boot: write the hvm_start_info + memmap instead of the Linux zero
+            // page. The cmdline is already at CMDLINE_START (via load_cmdline).
+            arch::x86_64::pvh::configure_pvh(&self.guest_memory)
+                .map_err(|_| Error::ConfigureSystem(arch::x86_64::Error::ZeroPageSetup))?;
+        } else {
             let cmdline_len = if cfg!(feature = "tee") {
                 arch::x86_64::layout::CMDLINE_SEV_SIZE
             } else {

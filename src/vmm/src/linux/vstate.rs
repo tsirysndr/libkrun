@@ -1170,6 +1170,7 @@ impl Vcpu {
         kernel_start_addr: GuestAddress,
         vcpu_config: &VcpuConfig,
         kernel_boot: bool,
+        pvh: bool,
     ) -> Result<()> {
         let cpuid_vm_spec = VmSpec::new(
             self.id,
@@ -1201,11 +1202,25 @@ impl Vcpu {
 
         if kernel_boot {
             arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
-            arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.raw_value(), self.id)
-                .map_err(Error::REGSConfiguration)?;
             arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
-            arch::x86_64::regs::setup_sregs(guest_mem, &self.fd, self.id)
-                .map_err(Error::SREGSConfiguration)?;
+            if pvh {
+                // PVH: enter at the PHYS32_ENTRY in 32-bit protected mode with the
+                // hvm_start_info paddr in %ebx (fixed at layout::PVH_INFO_START).
+                arch::x86_64::regs::setup_regs_pvh(
+                    &self.fd,
+                    kernel_start_addr.raw_value(),
+                    arch::x86_64::layout::PVH_INFO_START,
+                )
+                .map_err(Error::REGSConfiguration)?;
+                arch::x86_64::regs::setup_sregs_pvh(guest_mem, &self.fd)
+                    .map_err(Error::SREGSConfiguration)?;
+            } else {
+                // Linux 64-bit boot protocol: long mode + zero page in %rsi.
+                arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.raw_value(), self.id)
+                    .map_err(Error::REGSConfiguration)?;
+                arch::x86_64::regs::setup_sregs(guest_mem, &self.fd, self.id)
+                    .map_err(Error::SREGSConfiguration)?;
+            }
             arch::x86_64::interrupts::set_lint(&self.fd).map_err(Error::LocalIntConfiguration)?;
         }
         Ok(())
@@ -1904,19 +1919,19 @@ mod tests {
         };
 
         assert!(vcpu
-            .configure_x86_64(&vm_mem, GuestAddress(0), &vcpu_config, true)
+            .configure_x86_64(&vm_mem, GuestAddress(0), &vcpu_config, true, false)
             .is_ok());
 
         // Test configure while using the T2 template.
         vcpu_config.cpu_template = Some(CpuFeaturesTemplate::T2);
         assert!(vcpu
-            .configure_x86_64(&vm_mem, GuestAddress(0), &vcpu_config, true)
+            .configure_x86_64(&vm_mem, GuestAddress(0), &vcpu_config, true, false)
             .is_ok());
 
         // Test configure while using the C3 template.
         vcpu_config.cpu_template = Some(CpuFeaturesTemplate::C3);
         assert!(vcpu
-            .configure_x86_64(&vm_mem, GuestAddress(0), &vcpu_config, true)
+            .configure_x86_64(&vm_mem, GuestAddress(0), &vcpu_config, true, false)
             .is_ok());
     }
 

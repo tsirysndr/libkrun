@@ -51,18 +51,13 @@ pub struct hvm_memmap_table_entry {
 unsafe impl ByteValued for hvm_memmap_table_entry {}
 
 #[derive(Debug)]
-pub enum Error {
-    /// Writing the hvm_start_info / memmap to guest memory failed.
-    WriteStartInfo,
-}
-
 /// Write the E820-style memory map (from the guest RAM regions) followed by the
 /// `hvm_start_info` at the fixed layout addresses. The kernel cmdline is expected
 /// to already be at [`CMDLINE_START`] (libkrun's `load_cmdline` writes it there).
 ///
 /// The start_info always lands at [`PVH_INFO_START`], so the vcpu setup can load
 /// that constant into `%ebx` without threading the address around.
-pub fn configure_pvh(guest_mem: &GuestMemoryMmap) -> Result<(), Error> {
+pub fn configure_pvh(guest_mem: &GuestMemoryMmap) -> Result<(), vm_memory::GuestMemoryError> {
     // 1. Memory map: mark every guest RAM region usable. libkrun has no ACPI
     //    tables to reserve here, and NetBSD's MICROVM only needs the RAM ranges.
     let mut addr = GuestAddress(PVH_MEMMAP_START);
@@ -74,9 +69,7 @@ pub fn configure_pvh(guest_mem: &GuestMemoryMmap) -> Result<(), Error> {
             type_: E820_RAM,
             reserved: 0,
         };
-        guest_mem
-            .write_obj(entry, addr)
-            .map_err(|_| Error::WriteStartInfo)?;
+        guest_mem.write_obj(entry, addr)?;
         addr =
             GuestAddress(addr.raw_value() + std::mem::size_of::<hvm_memmap_table_entry>() as u64);
         entries += 1;
@@ -92,9 +85,7 @@ pub fn configure_pvh(guest_mem: &GuestMemoryMmap) -> Result<(), Error> {
         rsdp_paddr: 0,
         ..Default::default()
     };
-    guest_mem
-        .write_obj(info, GuestAddress(PVH_INFO_START))
-        .map_err(|_| Error::WriteStartInfo)?;
+    guest_mem.write_obj(info, GuestAddress(PVH_INFO_START))?;
 
     Ok(())
 }
