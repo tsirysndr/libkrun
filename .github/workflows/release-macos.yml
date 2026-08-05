@@ -1,0 +1,143 @@
+name: release-macos
+
+# Build this fork's libkrun natively on macOS and attach the tarball to a
+# GitHub release. Companion to release.yml, which does the same for Linux.
+#
+# The macOS build is not just "make" — two host-toolchain details bite:
+#
+#   * The guest init blob is a STATIC LINUX binary cross-compiled from macOS.
+#     The Makefile drives that with `clang -target … -fuse-ld=lld`, so the LLVM
+#     linker must be present or the build dies with
+#     "invalid linker name in argument '-fuse-ld=lld'". `brew install lld`
+#     supplies ld.lld (and pulls in llvm, which we also need below). The Linux
+#     sysroot it links against is downloaded and unpacked by the Makefile
+#     itself, so there is nothing to prepare for that.
+#
+#   * The bindgen-based crates (krun-display, krun-input) build scripts are
+#     linked against @rpath/libclang.dylib and abort at runtime if dyld cannot
+#     find it. Setting DYLD_FALLBACK_LIBRARY_PATH does NOT help: /usr/bin/make
+#     is SIP-protected, and dyld strips DYLD_* variables when it execs, so the
+#     value never reaches cargo. Placing libclang.dylib on the rpath search
+#     list (target/release and target/release/deps) is what actually works.
+#
+# Feature flags default to what bsdkrun's guests need. GPU=1 is deliberately
+# NOT the default: it needs virglrenderer from the third-party slp/krun tap,
+# which is a lot of CI surface for a feature nothing here exercises. Pass it
+# via the `features` input if you want Homebrew parity
+# (`BLK=1 NET=1 GPU=1 TIMESYNC=1`) and add the tap install below.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      features:
+        description: "make feature flags"
+        default: "BLK=1 NET=1 TIMESYNC=1"
+        required: false
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  build:
+    name: release · ${{ matrix.arch }}-apple-darwin
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is Apple silicon. To also ship Intel, add
+          # `- arch: x86_64` / `runner: macos-13` here — nothing else changes.
+          - arch: aarch64
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    env:
+      FEATURES: ${{ github.event.inputs.features || 'BLK=1 NET=1 TIMESYNC=1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # lld is the cross-linker for the Linux init blob; it pulls in llvm,
+      # which is where libclang.dylib comes from.
+      - name: Install build deps
+        run: |
+          set -eux
+          brew install lld
+          test -f "$(brew --prefix llvm)/lib/libclang.dylib"
+
+      # The Makefile downloads and unpacks a Debian sysroot on first build.
+      # Cache it so repeat runs skip the fetch. The package set and the Debian
+      # release are both defined in the Makefile, so keying on it is what
+      # invalidates the cache when the sysroot definition changes.
+      - name: Cache Linux sysroot
+        uses: actions/cache@v4
+        with:
+          path: linux-sysroot
+          key: linux-sysroot-${{ runner.os }}-${{ hashFiles('Makefile') }}
+
+      # See the header: the build scripts resolve libclang via @rpath, and
+      # DYLD_* cannot survive SIP-protected make. Put it on the rpath instead.
+      - name: Make libclang reachable via rpath
+        run: |
+          set -eux
+          LLVM_LIB="$(brew --prefix llvm)/lib"
+          mkdir -p target/release/deps
+          ln -sf "$LLVM_LIB/libclang.dylib" target/release/libclang.dylib
+          ln -sf "$LLVM_LIB/libclang.dylib" target/release/deps/libclang.dylib
+
+      - name: Build (${{ env.FEATURES }})
+        run: |
+          set -eux
+          export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+          make -j"$(sysctl -n hw.ncpu)" $FEATURES PREFIX=/usr/local
+
+      # Fail loudly if the feature flags silently dropped an export. bsdkrun
+      # refuses to boot without krun_add_net_unixgram, and a libkrun built
+      # WITHOUT NET=1 still links and passes a smoke test — it just cannot
+      # attach a NIC, which is a confusing failure to debug after the fact.
+      - name: Verify exported symbols
+        run: |
+          set -eux
+          DYLIB=$(find target/release -maxdepth 1 -name 'libkrun*.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          nm -gU "$DYLIB" | grep -q krun_create_ctx
+          case "$FEATURES" in
+            *NET=1*) nm -gU "$DYLIB" | grep -q krun_add_net_unixgram ;;
+          esac
+
+      # Stage a PREFIX=/usr/local install and tar its contents, so the archive
+      # extracts cleanly into /usr/local (lib/, include/, pkgconfig). Ad-hoc
+      # sign the dylib first: it is loaded into a process holding the
+      # hypervisor entitlement, and an unsigned library is refused unless that
+      # process also disables library validation.
+      - name: Package
+        run: |
+          set -eux
+          make install $FEATURES PREFIX=/usr/local DESTDIR="$PWD/staging"
+          find staging -name 'libkrun*.dylib' -type f \
+            -exec codesign --force -s - {} \;
+          TAG="${GITHUB_REF_NAME}"
+          NAME="libkrun-${TAG}-${{ matrix.arch }}-apple-darwin"
+          mkdir -p dist
+          tar -C staging/usr/local -czf "dist/${NAME}.tar.gz" .
+          ( cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
+          ls -lh dist
+
+      # Always expose the build as workflow artifacts (handy for manual runs,
+      # where there is no tag and the release step is skipped).
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libkrun-${{ matrix.arch }}-apple-darwin
+          path: dist/*
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

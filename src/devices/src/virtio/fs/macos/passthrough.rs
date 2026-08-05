@@ -1248,7 +1248,11 @@ fn set_secctx(file: &InodeHandle, secctx: SecContext, symlink: bool) -> io::Resu
 fn remove_security_capability(file: &InodeHandle) {
     let ret = match file {
         InodeHandle::Path(path) => unsafe {
-            libc::removexattr(path.as_ptr(), SECURITY_CAPABILITY.as_ptr() as *const i8, 0)
+            libc::removexattr(
+                path.as_ptr(),
+                SECURITY_CAPABILITY.as_ptr() as *const i8,
+                libc::XATTR_NOFOLLOW,
+            )
         },
         InodeHandle::Fd(fd) => unsafe {
             libc::fremovexattr(*fd, SECURITY_CAPABILITY.as_ptr() as *const i8, 0)
@@ -2342,6 +2346,20 @@ impl FileSystem for PassthroughFs {
         Ok(())
     }
 
+    // The four xattr handlers below all pass XATTR_NOFOLLOW. FUSE addresses an
+    // inode the guest kernel has already resolved, so these must act on that
+    // inode itself and never traverse a final symlink — the guest asked with
+    // lgetxattr/llistxattr semantics.
+    //
+    // Following is not merely imprecise here, it fails outright: a symlink in a
+    // guest rootfs routinely has an *absolute* target that is meaningful only
+    // inside the guest. A nix profile is built entirely from such links
+    // (`…-profile/bin/tee` -> `/nix/store/…-coreutils-full/bin/tee`), and
+    // resolving one on the host looks for a host-side `/nix/store/…` that does
+    // not exist, so the call returns ENOENT. nix does tolerate ENOTSUP and
+    // ENODATA from listxattr, but not ENOENT, and aborts with
+    // "querying extended attributes of '…': No such file or directory" —
+    // making `nix profile add` unusable on a virtio-fs rootfs.
     fn setxattr(
         &self,
         _ctx: Context,
@@ -2360,7 +2378,7 @@ impl FileSystem for PassthroughFs {
             return Err(linux_error(io::Error::from_raw_os_error(libc::EACCES)));
         }
 
-        let mut mflags: i32 = 0;
+        let mut mflags: i32 = libc::XATTR_NOFOLLOW;
         if (flags as i32) & bindings::LINUX_XATTR_CREATE != 0 {
             mflags |= libc::XATTR_CREATE;
         }
@@ -2428,7 +2446,7 @@ impl FileSystem for PassthroughFs {
                         std::ptr::null_mut(),
                         size as libc::size_t,
                         0,
-                        0,
+                        libc::XATTR_NOFOLLOW,
                     )
                 } else {
                     libc::getxattr(
@@ -2437,7 +2455,7 @@ impl FileSystem for PassthroughFs {
                         buf.as_mut_ptr() as *mut libc::c_void,
                         size as libc::size_t,
                         0,
-                        0,
+                        libc::XATTR_NOFOLLOW,
                     )
                 }
             },
@@ -2489,7 +2507,7 @@ impl FileSystem for PassthroughFs {
                     c_path.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_char,
                     512,
-                    0,
+                    libc::XATTR_NOFOLLOW,
                 )
             },
             InodeHandle::Fd(fd) => unsafe {
@@ -2548,7 +2566,7 @@ impl FileSystem for PassthroughFs {
         // Safe because this doesn't modify any memory and we check the return value.
         let res = match self.inode_to_handle(inode, true)? {
             InodeHandle::Path(c_path) => unsafe {
-                libc::removexattr(c_path.as_ptr(), name.as_ptr(), 0)
+                libc::removexattr(c_path.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW)
             },
             InodeHandle::Fd(fd) => unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) },
         };
