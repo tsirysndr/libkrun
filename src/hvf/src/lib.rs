@@ -638,6 +638,10 @@ impl HvfVcpu<'_> {
 
                     match len {
                         1 => self.mmio_buf[0..1].copy_from_slice(&(val as u8).to_le_bytes()),
+                        // Halfword accesses: the PL011's registers are 16-bit
+                        // wide, and guests such as Unikraft drive them with
+                        // strh. The read path already handles len=2.
+                        2 => self.mmio_buf[0..2].copy_from_slice(&(val as u16).to_le_bytes()),
                         4 => self.mmio_buf[0..4].copy_from_slice(&(val as u32).to_le_bytes()),
                         8 => self.mmio_buf[0..8].copy_from_slice(&val.to_le_bytes()),
                         _ => panic!("unsupported mmio len={len}"),
