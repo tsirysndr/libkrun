@@ -140,6 +140,52 @@ impl Cmdline {
         Ok(())
     }
 
+    /// Validates and inserts a key value pair *before* the `--` stop sequence,
+    /// or at the end of the command line if it has none.
+    ///
+    /// Guests that follow the `<params> -- <argv>` convention — Unikraft for
+    /// its library parameters, Linux for init arguments — stop reading kernel
+    /// parameters at `--`. A parameter appended after it is not ignored but
+    /// silently repurposed as an argument to the guest's program, so anything
+    /// the VMM adds late in the boot (device hints, which are only known once
+    /// the devices are attached) has to go in ahead of the caller's `--`.
+    pub fn insert_before_stop<T: AsRef<str>>(&mut self, key: T, val: T) -> Result<()> {
+        let k = key.as_ref();
+        let v = val.as_ref();
+
+        let Some(stop) = self.stop_offset() else {
+            return self.insert(k, v);
+        };
+
+        valid_element(k)?;
+        valid_element(v)?;
+        self.has_capacity(k.len() + v.len() + 1)?;
+
+        // "<k>=<v> " keeps the stop sequence a separate word; the command line
+        // is never empty here (it holds at least the `--` we found).
+        self.line.insert(stop, ' ');
+        self.line.insert_str(stop, v);
+        self.line.insert(stop, '=');
+        self.line.insert_str(stop, k);
+        self.end_push();
+
+        Ok(())
+    }
+
+    /// Byte offset of the `--` stop sequence, if the command line has one as a
+    /// word of its own (`-->` and `x--` are not stop sequences).
+    fn stop_offset(&self) -> Option<usize> {
+        let bytes = self.line.as_bytes();
+
+        self.line
+            .match_indices("--")
+            .find(|(at, _)| {
+                (*at == 0 || bytes[at - 1] == b' ')
+                    && (at + 2 == bytes.len() || bytes[at + 2] == b' ')
+            })
+            .map(|(at, _)| at)
+    }
+
     /// Validates and inserts a string to the end of the current command line.
     pub fn insert_str<T: AsRef<str>>(&mut self, slug: T) -> Result<()> {
         let s = slug.as_ref();
@@ -231,6 +277,60 @@ mod tests {
         assert!(cl.insert_str("nopci").is_ok());
         assert_eq!(cl.as_str(), "noapic nopci");
         assert_eq!(cl.as_str(), cl.as_cstring().unwrap().to_str().unwrap());
+    }
+
+    #[test]
+    fn insert_before_stop_sequence() {
+        // With a stop sequence, the pair lands in the parameter half.
+        let mut cl = Cmdline::new(200);
+        assert!(cl.insert_str("img vfs.fstab=[ x ] -- one two").is_ok());
+        assert!(cl
+            .insert_before_stop("virtio_mmio.device", "4K@0xd0000000:5")
+            .is_ok());
+        assert_eq!(
+            cl.as_str(),
+            "img vfs.fstab=[ x ] virtio_mmio.device=4K@0xd0000000:5 -- one two"
+        );
+        // A second one keeps the same order the appends would have had.
+        assert!(cl
+            .insert_before_stop("virtio_mmio.device", "4K@0xd0001000:6")
+            .is_ok());
+        assert_eq!(
+            cl.as_str(),
+            "img vfs.fstab=[ x ] virtio_mmio.device=4K@0xd0000000:5 \
+             virtio_mmio.device=4K@0xd0001000:6 -- one two"
+        );
+
+        // A trailing stop sequence still gets inserted ahead of.
+        let mut cl = Cmdline::new(100);
+        assert!(cl.insert_str("img --").is_ok());
+        assert!(cl.insert_before_stop("a", "b").is_ok());
+        assert_eq!(cl.as_str(), "img a=b --");
+
+        // Without one, it appends, exactly like insert().
+        let mut cl = Cmdline::new(100);
+        assert!(cl.insert_str("console=ttyS0").is_ok());
+        assert!(cl.insert_before_stop("a", "b").is_ok());
+        assert_eq!(cl.as_str(), "console=ttyS0 a=b");
+
+        // Only a whole word counts as the stop sequence.
+        let mut cl = Cmdline::new(100);
+        assert!(cl.insert_str("img x--y --strict-mode").is_ok());
+        assert!(cl.insert_before_stop("a", "b").is_ok());
+        assert_eq!(cl.as_str(), "img x--y --strict-mode a=b");
+
+        // Validation and capacity still apply.
+        let mut cl = Cmdline::new(100);
+        assert!(cl.insert_str("img --").is_ok());
+        assert_eq!(cl.insert_before_stop("a b", "c"), Err(Error::HasSpace));
+        assert_eq!(cl.as_str(), "img --");
+        let mut cl = Cmdline::new(10);
+        assert!(cl.insert_str("img --").is_ok());
+        assert_eq!(
+            cl.insert_before_stop("hello", "world"),
+            Err(Error::TooLarge)
+        );
+        assert_eq!(cl.as_str(), "img --");
     }
 
     #[test]

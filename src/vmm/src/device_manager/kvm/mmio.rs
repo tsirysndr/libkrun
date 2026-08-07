@@ -168,7 +168,13 @@ impl MMIODeviceManager {
         Ok(ret)
     }
 
-    /// Append a registered MMIO device to the kernel cmdline.
+    /// Add a registered MMIO device to the kernel cmdline.
+    ///
+    /// The hint goes ahead of a `--` stop sequence if the caller's command line
+    /// has one (see `Cmdline::insert_before_stop`): devices are attached long
+    /// after the command line was set, and a guest that splits its command line
+    /// at `--` — Unikraft does, for its library parameters — would otherwise
+    /// never see the hint and come up with no virtio devices at all.
     #[cfg(target_arch = "x86_64")]
     pub fn add_device_to_cmdline(
         &mut self,
@@ -192,7 +198,10 @@ impl MMIODeviceManager {
                 format!("virtio_mmio.device_{n}")
             };
             return cmdline
-                .insert(key, format!("{}K@0x{:08x}:{}", MMIO_LEN / 1024, mmio_base, irq))
+                .insert_before_stop(
+                    key,
+                    format!("{}K@0x{:08x}:{}", MMIO_LEN / 1024, mmio_base, irq),
+                )
                 .map_err(Error::Cmdline);
         }
 
@@ -202,7 +211,7 @@ impl MMIODeviceManager {
         // bytes to 1024; further, the '{}' formatting rust construct will automatically
         // transform it to decimal
         cmdline
-            .insert(
+            .insert_before_stop(
                 "virtio_mmio.device",
                 &format!("{}K@0x{:08x}:{}", MMIO_LEN / 1024, mmio_base, irq),
             )
