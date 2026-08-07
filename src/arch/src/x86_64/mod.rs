@@ -303,8 +303,14 @@ pub fn configure_system(
             &mut params.0,
             himem_start.raw_value(),
             // it's safe to use unchecked_offset_from because
-            // mem_end > himem_start
-            last_addr.unchecked_offset_from(himem_start) + 1,
+            // mem_end > himem_start.
+            //
+            // No `+ 1`: ram_last_addr is the address one PAST the last byte of
+            // guest RAM, not the last valid one, so the subtraction already
+            // gives the length. (Firecracker, which this descends from, adds 1
+            // because its `last_addr` comes from GuestMemory::last_addr(),
+            // which IS inclusive.)
+            last_addr.unchecked_offset_from(himem_start),
             E820_RAM,
         )?;
     } else {
@@ -322,8 +328,9 @@ pub fn configure_system(
                 &mut params.0,
                 first_addr_past_32bits.raw_value(),
                 // it's safe to use unchecked_offset_from because
-                // mem_end > first_addr_past_32bits
-                last_addr.unchecked_offset_from(first_addr_past_32bits) + 1,
+                // mem_end > first_addr_past_32bits.
+                // No `+ 1` — see the below-4G entry above.
+                last_addr.unchecked_offset_from(first_addr_past_32bits),
                 E820_RAM,
             )?;
         }
@@ -361,6 +368,7 @@ fn add_e820_entry(
 mod tests {
     use super::*;
     use arch_gen::x86::bootparam::e820entry;
+    use vm_memory::GuestMemory;
 
     const KERNEL_LOAD_ADDR: u64 = 0x0100_0000;
     const KERNEL_SIZE: usize = 0x01E0_0000;
@@ -431,6 +439,45 @@ mod tests {
             arch_memory_regions(mem_size, Some(KERNEL_LOAD_ADDR), KERNEL_SIZE, 0, None);
         let gm = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
         configure_system(&gm, &arch_mem_info, GuestAddress(0), 0, &None, no_vcpus).unwrap();
+    }
+
+    /// Every e820 RAM region must lie entirely inside guest memory.
+    ///
+    /// Regression test: the below-4G and above-4G entries used to add 1 to the
+    /// length, so the map claimed one byte more RAM than the VM actually had.
+    /// Linux tolerates that (it clips partial pages), which is why it went
+    /// unnoticed — but a guest that page-aligns free regions *up*, as Unikraft
+    /// does, turns that one byte into a whole page of RAM that does not exist,
+    /// hands it out, and corrupts its allocator on the first write.
+    #[test]
+    fn e820_ram_regions_never_exceed_guest_memory() {
+        // Below the 32-bit hole, at the hole, and above it.
+        for mem_size in [128usize << 20, 3328 << 20, 3330 << 20] {
+            let (arch_mem_info, arch_mem_regions) = arch_memory_regions(mem_size, None, 0, 0, None);
+            let gm = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
+            configure_system(&gm, &arch_mem_info, GuestAddress(0), 0, &None, 1).unwrap();
+
+            let params: BootParamsWrapper = gm
+                .read_obj(GuestAddress(layout::ZERO_PAGE_START))
+                .expect("zero page should be readable");
+
+            for i in 0..params.0.e820_entries as usize {
+                // Copy out of the packed struct before taking any reference.
+                let e = params.0.e820_map[i];
+                let (addr, size, type_) = (e.addr, e.size, e.type_);
+                if type_ != E820_RAM {
+                    continue;
+                }
+                assert_ne!(size, 0, "mem_size {mem_size:#x}: empty e820 entry");
+                // The whole span the entry claims must be real guest memory.
+                assert!(
+                    gm.check_range(GuestAddress(addr), size as usize),
+                    "mem_size {mem_size:#x}: e820 RAM [{:#x}, {:#x}] escapes guest memory",
+                    addr,
+                    addr + size - 1,
+                );
+            }
+        }
     }
 
     #[test]
