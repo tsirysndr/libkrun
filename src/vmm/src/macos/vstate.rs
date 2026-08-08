@@ -457,6 +457,25 @@ impl Vcpu {
             .set_initial_state(entry_addr, self.fdt_addr)
             .unwrap_or_else(|_| panic!("Can't set HVF vCPU {hvf_vcpuid} initial state"));
 
+        // KRUN_SAMPLE_MS=<ms> reports where this vCPU is, every <ms>. A guest
+        // that faults early and spins in its own EL1 vector never exits, so it
+        // leaves no trace at all out here; cancelling it periodically forces the
+        // run loop to come back and read its registers (which HVF only permits
+        // from this thread). Diagnostic only - unset, nothing is spawned.
+        if let Some(ms) = hvf::sample_interval_ms() {
+            let id = hvf_vcpuid;
+            std::thread::spawn(move || {
+                loop {
+                    // Sleep first: the vCPU is not running yet, and cancelling
+                    // one that has not started fails. Errors are ignored rather
+                    // than fatal for the same reason - a cancel that lands in a
+                    // gap is not a reason to stop sampling.
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    let _ = hvf::vcpu_request_exit(id);
+                }
+            });
+        }
+
         loop {
             match self.run_emulation(&mut hvf_vcpu) {
                 // Emulation ran successfully, continue.

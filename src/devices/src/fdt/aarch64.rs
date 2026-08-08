@@ -224,7 +224,23 @@ fn create_gic_node(fdt: &mut FdtWriter, gic_device: &IrqChip) -> Result<()> {
     let gic_reg_prop = generate_prop64(&gic_device.device_properties());
 
     let intc_node = fdt.begin_node("intc")?;
-    fdt.property_string("compatible", &gic_device.fdt_compatibility())?;
+    // A GICv2 is advertised under both of its usual names. libkrun's own EDK2
+    // build locates the controller by walking this DT, and (like Linux) it
+    // matches a v2 on "arm,cortex-a15-gic" - the string QEMU emits - so
+    // publishing only "arm,gic-400" leaves the firmware unable to find any GIC
+    // and ArmGicDxe asserts before the guest ever loads. Other guests match the
+    // gic-400 name, so keep it first and let the list satisfy both.
+    if gic_device.version() == 2 {
+        fdt.property_string_list(
+            "compatible",
+            vec![
+                gic_device.fdt_compatibility(),
+                "arm,cortex-a15-gic".to_string(),
+            ],
+        )?;
+    } else {
+        fdt.property_string("compatible", &gic_device.fdt_compatibility())?;
+    }
     fdt.property_null("interrupt-controller")?;
     // "interrupt-cells" field specifies the number of cells needed to encode an
     // interrupt source. The type shall be a <u32> and the value shall be 3 if no PPI affinity description

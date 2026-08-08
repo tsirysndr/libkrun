@@ -21,11 +21,19 @@
 pub struct AcpiInfo {
     /// MPIDR per vCPU, in vCPU order.
     pub mpidrs: Vec<u64>,
-    /// GICv3 distributor base.
+    /// GIC architecture version, 2 or 3. The MADT has to describe one or the
+    /// other consistently: a v2 is found through a physical CPU interface in
+    /// each GICC, a v3 through the redistributors and the system registers.
+    /// Publishing a mixture leaves the firmware unable to find any controller
+    /// at all (EDK2's ArmGicDxe asserts outright).
+    pub gic_version: u32,
+    /// Distributor base. Both versions.
     pub gicd_base: u64,
-    /// GICv3 redistributor discovery range.
+    /// GICv3 redistributor discovery range. Ignored when `gic_version` is 2.
     pub gicr_base: u64,
     pub gicr_size: u64,
+    /// GICv2 physical CPU interface base. Ignored when `gic_version` is 3.
+    pub gicc_base: u64,
     /// PL011 base and its interrupt (absolute GSIV/intid).
     pub uart_base: u64,
     pub uart_irq: u32,
@@ -231,6 +239,7 @@ fn build_fadt(dsdt_offset: u32) -> Vec<u8> {
 }
 
 fn build_madt(info: &AcpiInfo) -> Vec<u8> {
+    let v2 = info.gic_version == 2;
     let mut t = header(b"APIC", 5);
     put_u32(&mut t, 0); // LocalApicAddress (n/a)
     put_u32(&mut t, 0); // Flags
@@ -247,7 +256,10 @@ fn build_madt(info: &AcpiInfo) -> Vec<u8> {
         put_u32(&mut t, 0); // parking protocol version
         put_u32(&mut t, 0); // performance interrupt
         put_u64(&mut t, 0); // parked address
-        put_u64(&mut t, 0); // physical base (GICv3 sysreg iface)
+        // Physical base: a GICv2's CPU interface is driven through MMIO, so it
+        // belongs here. A GICv3 uses the ICC system registers instead and the
+        // field must read 0.
+        put_u64(&mut t, if v2 { info.gicc_base } else { 0 });
         put_u64(&mut t, 0); // GICV
         put_u64(&mut t, 0); // GICH
         put_u32(&mut t, 0); // VGIC maintenance interrupt
@@ -267,18 +279,21 @@ fn build_madt(info: &AcpiInfo) -> Vec<u8> {
     put_u32(&mut t, 0); // GIC ID
     put_u64(&mut t, info.gicd_base);
     put_u32(&mut t, 0); // system vector base
-    t.push(3); // GIC version
+    t.push(info.gic_version as u8); // GIC version
     t.extend_from_slice(&[0, 0, 0]);
     debug_assert_eq!(t.len() - start, 24);
 
-    // GICR (type 0xE, 16 bytes): redistributor discovery range.
-    let start = t.len();
-    t.push(0x0e);
-    t.push(16);
-    put_u16(&mut t, 0);
-    put_u64(&mut t, info.gicr_base);
-    put_u32(&mut t, info.gicr_size as u32);
-    debug_assert_eq!(t.len() - start, 16);
+    // GICR (type 0xE, 16 bytes): redistributor discovery range. A GICv2 has no
+    // redistributors, and the structure must be absent rather than zeroed.
+    if !v2 {
+        let start = t.len();
+        t.push(0x0e);
+        t.push(16);
+        put_u16(&mut t, 0);
+        put_u64(&mut t, info.gicr_base);
+        put_u32(&mut t, info.gicr_size as u32);
+        debug_assert_eq!(t.len() - start, 16);
+    }
 
     finish_table(&mut t);
     t
@@ -463,13 +478,49 @@ mod tests {
     fn info() -> AcpiInfo {
         AcpiInfo {
             mpidrs: vec![0, 1],
+            gic_version: 3,
             gicd_base: 0x9fd_0000,
             gicr_base: 0x9fe_0000,
             gicr_size: 0x2_0000,
+            gicc_base: 0,
             uart_base: 0xa00_1000,
             uart_irq: 33,
             virtio: vec![(0xa00_2000, 0x1000, 34), (0xa00_3000, 0x1000, 35)],
         }
+    }
+
+    /// A GICv2 must be described through the GICC physical base, with the GIC
+    /// version byte set to 2 and no GICR structure at all.
+    #[test]
+    fn madt_describes_a_gicv2_consistently() {
+        let mut i = info();
+        i.gic_version = 2;
+        i.gicr_base = 0;
+        i.gicr_size = 0;
+        i.gicc_base = 0x8010000;
+        let madt = build_madt(&i);
+
+        let mut off = 44; // past the MADT header + LocalApicAddress + Flags
+        let mut saw_gicd = false;
+        while off < madt.len() {
+            let (typ, len) = (madt[off], madt[off + 1] as usize);
+            match typ {
+                0x0b => {
+                    // GICC physical base sits 32 bytes into the structure.
+                    let base = u64::from_le_bytes(
+                        madt[off + 32..off + 40].try_into().unwrap());
+                    assert_eq!(base, 0x8010000, "GICC must carry the CPU interface");
+                }
+                0x0c => {
+                    saw_gicd = true;
+                    assert_eq!(madt[off + 20], 2, "GIC version byte must be 2");
+                }
+                0x0e => panic!("a GICv2 must not publish a GICR structure"),
+                _ => {}
+            }
+            off += len;
+        }
+        assert!(saw_gicd);
     }
 
     /// Walk the blob by each table's declared length; headers and sizes must

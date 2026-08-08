@@ -8,6 +8,8 @@
 pub mod aia;
 pub mod gic;
 #[cfg(target_os = "macos")]
+mod gicv2;
+#[cfg(target_os = "macos")]
 mod gicv3;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod hvfgicv3;
@@ -49,6 +51,8 @@ use riscv64::serial;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::cmos::Cmos;
+#[cfg(target_os = "macos")]
+pub use self::gicv2::GicV2;
 #[cfg(target_os = "macos")]
 pub use self::gicv3::GicV3;
 #[cfg(target_arch = "aarch64")]

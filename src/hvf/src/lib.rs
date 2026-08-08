@@ -165,6 +165,20 @@ pub trait Vcpus {
     fn handle_sysreg_write(&self, vcpuid: u64, reg: u32, val: u64) -> bool;
 }
 
+/// Whether `KRUN_SAMPLE_MS` asked for periodic vCPU state reports. Unset (or 0)
+/// means the sampler never runs and cancels stay silent, as before.
+pub fn sampling_enabled() -> bool {
+    sample_interval_ms().is_some()
+}
+
+/// The sampling interval from `KRUN_SAMPLE_MS`, if it names a positive number.
+pub fn sample_interval_ms() -> Option<u64> {
+    std::env::var("KRUN_SAMPLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+}
+
 pub fn vcpu_request_exit(vcpuid: u64) -> Result<(), Error> {
     let mut vcpu: u64 = vcpuid;
     let ret = unsafe { hv_vcpus_exit(&mut vcpu, 1) };
@@ -506,6 +520,35 @@ impl HvfVcpu<'_> {
         }
     }
 
+    /// Log where the guest currently is and why, for a guest that has stopped
+    /// making progress without exiting.
+    ///
+    /// A stage 1 MMU fault is taken by the guest's own EL1 vector and never
+    /// reaches the hypervisor, so a kernel that faults early and then spins in
+    /// its handler is completely invisible from out here - no exits, no MMIO,
+    /// nothing in the trace. The registers still hold the evidence: ELR_EL1 and
+    /// ESR_EL1/FAR_EL1 describe the fault the guest took, while PC shows where
+    /// it is looping now. Must run on the vCPU's own thread (HVF rejects
+    /// register access from anywhere else), so it is driven by cancelling the
+    /// vCPU and reporting from the run loop.
+    pub fn dump_state(&self) {
+        let r = |reg: u16| self.read_sys_reg(reg).unwrap_or(u64::MAX);
+        let esr = r(hv_sys_reg_t_HV_SYS_REG_ESR_EL1 as u16);
+        debug!(
+            "vcpu[{}] SAMPLE pc=0x{:x} elr_el1=0x{:x} esr_el1=0x{:x} (ec=0x{:x} dfsc=0x{:x}) \
+             far_el1=0x{:x} spsr_el1=0x{:x} sp_el1=0x{:x}",
+            self.vcpuid,
+            self.read_reg(hv_reg_t_HV_REG_PC).unwrap_or(u64::MAX),
+            r(hv_sys_reg_t_HV_SYS_REG_ELR_EL1 as u16),
+            esr,
+            (esr >> 26) & 0x3f,
+            esr & 0x3f,
+            r(hv_sys_reg_t_HV_SYS_REG_FAR_EL1 as u16),
+            r(hv_sys_reg_t_HV_SYS_REG_SPSR_EL1 as u16),
+            r(hv_sys_reg_t_HV_SYS_REG_SP_EL1 as u16),
+        );
+    }
+
     fn hvf_sync_vtimer(&mut self, vcpu_list: Arc<dyn Vcpus>) {
         if !self.vtimer_masked {
             return;
@@ -591,7 +634,15 @@ impl HvfVcpu<'_> {
                 self.vtimer_masked = true;
                 return Ok(VcpuExit::VtimerActivated);
             }
-            HV_EXIT_REASON_CANCELED => return Ok(VcpuExit::Canceled),
+            HV_EXIT_REASON_CANCELED => {
+                // A cancel is how the sampler gets onto this thread; see
+                // dump_state(). Reporting here keeps it off vstate's borrow of
+                // the returned VcpuExit.
+                if sampling_enabled() {
+                    self.dump_state();
+                }
+                return Ok(VcpuExit::Canceled);
+            }
             _ => {
                 let pc = self.read_reg(hv_reg_t_HV_REG_PC)?;
                 panic!(
@@ -621,12 +672,25 @@ impl HvfVcpu<'_> {
                 let srt: u32 = ((syndrome >> 16) & 0x1f) as u32;
                 let cm: u32 = ((syndrome >> 8) & 0x1) as u32;
 
-                debug!(
-                    "EC_DATAABORT {} {} {} {} {} {} {} {}",
-                    syndrome, isv as u8, iswrite as u8, s1ptw as u8, sas, len, srt, cm
-                );
-
                 let pa = self.vcpu_exit.exception.physical_address;
+                // pc/va/pa name the faulting instruction and what it touched:
+                // without them an abort on an address no device claims is
+                // indistinguishable from a normal MMIO exit, and the guest just
+                // appears to stop. Feed pc to addr2line against the guest's ELF.
+                debug!(
+                    "EC_DATAABORT {} {} {} {} {} {} {} {} pc=0x{:x} va=0x{:x} pa=0x{:x}",
+                    syndrome,
+                    isv as u8,
+                    iswrite as u8,
+                    s1ptw as u8,
+                    sas,
+                    len,
+                    srt,
+                    cm,
+                    self.read_reg(hv_reg_t_HV_REG_PC).unwrap_or(0),
+                    self.vcpu_exit.exception.virtual_address,
+                    pa,
+                );
                 self.pending_advance_pc = true;
 
                 if iswrite {

@@ -331,12 +331,25 @@ impl Vmm {
                 .collect();
             virtio.sort_by_key(|(addr, _, _)| *addr);
             let uart = dev_info.get(&(DeviceType::Serial, DeviceType::Serial.to_string()));
-            let gic_props = _intc.lock().unwrap().device_properties();
+            // device_properties() is positional and its tail means different
+            // things per version: [dist, dist_size, redist, redist_size] for a
+            // GICv3, but [dist, dist_size, cpuif, cpuif_size] for a GICv2.
+            let (gic_props, gic_version) = {
+                let gic = _intc.lock().unwrap();
+                (gic.device_properties(), gic.version())
+            };
+            let (gicr_base, gicr_size, gicc_base) = if gic_version == 2 {
+                (0, 0, gic_props[2])
+            } else {
+                (gic_props[2], gic_props[3], 0)
+            };
             let info = acpi::AcpiInfo {
                 mpidrs: vcpus.iter().map(|cpu| cpu.get_mpidr()).collect(),
+                gic_version,
                 gicd_base: gic_props[0],
-                gicr_base: gic_props[2],
-                gicr_size: gic_props[3],
+                gicr_base,
+                gicr_size,
+                gicc_base,
                 uart_base: uart.map(|u| u.addr()).unwrap_or(0),
                 uart_irq: uart.map(|u| u.irq()).unwrap_or(0),
                 virtio,

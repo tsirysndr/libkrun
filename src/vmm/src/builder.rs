@@ -39,7 +39,7 @@ use devices::legacy::Serial;
 #[cfg(target_os = "macos")]
 use devices::legacy::VcpuList;
 #[cfg(target_os = "macos")]
-use devices::legacy::{GicV3, HvfGicV3};
+use devices::legacy::{GicV2, GicV3, HvfGicV3};
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
@@ -896,11 +896,21 @@ pub fn build_microvm(
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     {
         intc = {
-            // If the system supports the in-kernel GIC, use it. Otherwise, fall back to the
-            // userspace implementation.
-            let gic = match HvfGicV3::new(vm_resources.vm_config().vcpu_count.unwrap() as u64) {
-                Ok(hvfgic) => IrqChipDevice::new(Box::new(hvfgic)),
-                Err(_) => IrqChipDevice::new(Box::new(GicV3::new(vcpu_list.clone()))),
+            let vcpu_count = vm_resources.vm_config().vcpu_count.unwrap() as u64;
+            // A GICv2 is opt-in via KRUN_GIC=v2, for guests whose aarch64 port
+            // predates GICv3 and so find no interrupt controller they can drive
+            // (OSv's released v0.57.0 kernel aborts outright). It is never the
+            // default: Apple's in-kernel GIC only implements v3, so asking for
+            // v2 always costs the userspace implementation.
+            let gic = if gic_v2_requested() {
+                IrqChipDevice::new(Box::new(GicV2::new(vcpu_list.clone())))
+            } else {
+                // If the system supports the in-kernel GIC, use it. Otherwise, fall back to the
+                // userspace implementation.
+                match HvfGicV3::new(vcpu_count) {
+                    Ok(hvfgic) => IrqChipDevice::new(Box::new(hvfgic)),
+                    Err(_) => IrqChipDevice::new(Box::new(GicV3::new(vcpu_list.clone()))),
+                }
             };
             Arc::new(Mutex::new(gic))
         };
@@ -994,9 +1004,23 @@ pub fn build_microvm(
     }
 
     #[cfg(not(feature = "tee"))]
-    attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
+    // KRUN_NO_BALLOON=1 leaves virtio-balloon off the MMIO bus, for guests with
+    // no balloon driver. Being the first device attached, it takes the first
+    // SPI, so a guest that ignores it still gets its interrupts — and reports
+    // them as unhandled, which is how OSv greets every boot. Free-page
+    // reporting is an optimisation, so omitting it only costs host memory.
+    if !balloon_disabled() {
+        attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
+    }
     #[cfg(not(feature = "tee"))]
-    attach_rng_device(&mut vmm, event_manager, intc.clone())?;
+    // KRUN_NO_RNG=1 leaves virtio-rng off the MMIO bus. It exists for guests
+    // whose rng driver is PCI-only: OSv v0.57.0 registers an rng driver that
+    // never populates the MMIO interrupt factory, so probing the device throws
+    // std::bad_function_call and takes the guest down during driver init. The
+    // device is not load-bearing, so omitting it costs the guest nothing.
+    if !rng_disabled() {
+        attach_rng_device(&mut vmm, event_manager, intc.clone())?;
+    }
     let mut console_id = 0;
     if !vm_resources.disable_implicit_console {
         attach_console_devices(
@@ -1156,6 +1180,32 @@ pub fn build_microvm(
         .map_err(StartMicrovmError::RegisterEvent)?;
 
     Ok(vmm)
+}
+
+/// Whether the caller asked to leave virtio-rng off the bus, via `KRUN_NO_RNG=1`.
+#[cfg(not(feature = "tee"))]
+fn rng_disabled() -> bool {
+    std::env::var_os("KRUN_NO_RNG").is_some_and(|v| v != "0")
+}
+
+/// Whether the caller asked to leave virtio-balloon off the bus, via
+/// `KRUN_NO_BALLOON=1`.
+#[cfg(not(feature = "tee"))]
+fn balloon_disabled() -> bool {
+    std::env::var_os("KRUN_NO_BALLOON").is_some_and(|v| v != "0")
+}
+
+/// Whether the caller asked for a GICv2 instead of the default GICv3, via
+/// `KRUN_GIC=v2` (`2` is accepted too). Anything else — including the variable
+/// being unset — selects GICv3, so the default path is untouched.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn gic_v2_requested() -> bool {
+    std::env::var("KRUN_GIC")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "v2" || v == "2"
+        })
+        .unwrap_or(false)
 }
 
 fn load_external_kernel(
