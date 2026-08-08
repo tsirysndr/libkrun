@@ -24,6 +24,8 @@ pub mod signal_handler;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+mod acpi;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -56,6 +58,10 @@ use arch::{ArchMemoryInfo, InitrdConfig};
 use crossbeam_channel::Sender;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use devices::fdt;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+use devices::fdt::DeviceInfoForFDT;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+use devices::legacy::gic::GICDevice;
 use devices::legacy::IrqChip;
 use devices::virtio::VmmExitObserver;
 use devices::{BusDevice, DeviceType};
@@ -209,6 +215,10 @@ pub struct Vmm {
     mmio_device_manager: MMIODeviceManager,
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
+    /// fw_cfg (EFI boots only): filled with ACPI blobs in `configure_system`,
+    /// once every device the tables must describe is attached.
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    fwcfg: Option<Arc<Mutex<devices::legacy::FwCfg>>>,
 }
 
 impl Vmm {
@@ -306,6 +316,36 @@ impl Vmm {
                 )
                 .map_err(Error::ConfigureSystem)?;
             }
+        }
+
+        // EFI boots: hand the firmware ACPI tables over fw_cfg. Built here —
+        // not at device-attach time — because the tables describe the vCPU
+        // MPIDRs and every virtio device, which are only all known now.
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        if let Some(fwcfg) = &self.fwcfg {
+            let dev_info = self.mmio_device_manager.get_device_info();
+            let mut virtio: Vec<(u64, u64, u32)> = dev_info
+                .iter()
+                .filter(|((t, _), _)| matches!(t, DeviceType::Virtio(_)))
+                .map(|(_, i)| (i.addr(), i.length(), i.irq()))
+                .collect();
+            virtio.sort_by_key(|(addr, _, _)| *addr);
+            let uart = dev_info.get(&(DeviceType::Serial, DeviceType::Serial.to_string()));
+            let gic_props = _intc.lock().unwrap().device_properties();
+            let info = acpi::AcpiInfo {
+                mpidrs: vcpus.iter().map(|cpu| cpu.get_mpidr()).collect(),
+                gicd_base: gic_props[0],
+                gicr_base: gic_props[2],
+                gicr_size: gic_props[3],
+                uart_base: uart.map(|u| u.addr()).unwrap_or(0),
+                uart_irq: uart.map(|u| u.irq()).unwrap_or(0),
+                virtio,
+            };
+            let blobs = acpi::build_acpi(&info);
+            let mut dev = fwcfg.lock().unwrap();
+            dev.add_file(acpi::FILE_LOADER, blobs.loader);
+            dev.add_file(acpi::FILE_RSDP, blobs.rsdp);
+            dev.add_file(acpi::FILE_TABLES, blobs.tables);
         }
 
         #[cfg(target_arch = "aarch64")]

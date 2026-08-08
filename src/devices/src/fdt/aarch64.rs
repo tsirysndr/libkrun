@@ -416,6 +416,21 @@ fn create_gpio_node<T: DeviceInfoForFDT + Clone + Debug>(
     Ok(())
 }
 
+/// The node EDK2's `QemuFwCfgLibMmio` probes for. The 16-byte reg (selector +
+/// data only) tells the guest the DMA interface is absent, so it falls back
+/// to MMIO reads. No interrupts: fw_cfg is polled.
+fn create_fwcfg_node<T: DeviceInfoForFDT + Clone + Debug>(
+    fdt: &mut FdtWriter,
+    dev_info: &T,
+) -> Result<()> {
+    let reg = generate_prop64(&[dev_info.addr(), 0x10]);
+    let node = fdt.begin_node(&format!("fw-cfg@{:x}", dev_info.addr()))?;
+    fdt.property_string("compatible", "qemu,fw-cfg-mmio")?;
+    fdt.property("reg", &reg)?;
+    fdt.end_node(node)?;
+    Ok(())
+}
+
 fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut FdtWriter,
     dev_info: &HashMap<(DeviceType, String), T>,
@@ -428,6 +443,7 @@ fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
             DeviceType::Gpio => create_gpio_node(fdt, info)?,
             DeviceType::RTC => create_rtc_node(fdt, info)?,
             DeviceType::Serial => create_serial_node(fdt, info)?,
+            DeviceType::FwCfg => create_fwcfg_node(fdt, info)?,
             DeviceType::Virtio(_) => {
                 ordered_virtio_device.push(info);
             }

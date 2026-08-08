@@ -259,6 +259,35 @@ impl MMIODeviceManager {
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Register a fw_cfg device (selector/data only — no interrupt, no DMA).
+    /// Content is loaded later, once every other device is known; see
+    /// `Vmm::configure_system`.
+    pub fn register_mmio_fwcfg(
+        &mut self,
+        fwcfg: Arc<Mutex<devices::legacy::FwCfg>>,
+    ) -> Result<u64> {
+        self.bus
+            .insert(fwcfg, self.mmio_base, MMIO_LEN)
+            .map_err(Error::BusError)?;
+
+        let ret = self.mmio_base;
+        self.id_to_dev_info.insert(
+            (DeviceType::FwCfg, DeviceType::FwCfg.to_string()),
+            MMIODeviceInfo {
+                addr: ret,
+                len: MMIO_LEN,
+                // No interrupt: fw_cfg is polled. The slot in MMIODeviceInfo
+                // still wants a number; 0 is never a valid SPI, and the FDT
+                // node doesn't emit an interrupts property.
+                irq: 0,
+            },
+        );
+
+        self.mmio_base += MMIO_LEN;
+        Ok(ret)
+    }
+
+    #[cfg(target_arch = "aarch64")]
     /// Register a MMIO GIC device.
     pub fn register_mmio_gic(&mut self, _vm: &Vm, intc: IrqChip) -> Result<()> {
         let (mmio_addr, mmio_size) = {

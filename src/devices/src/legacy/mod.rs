@@ -37,6 +37,8 @@ use x86_64::serial;
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 #[cfg(target_arch = "aarch64")]
+pub use aarch64::fwcfg::FwCfg;
+#[cfg(target_arch = "aarch64")]
 use aarch64::gpio;
 #[cfg(target_arch = "aarch64")]
 use aarch64::serial;

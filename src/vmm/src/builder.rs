@@ -804,6 +804,8 @@ pub fn build_microvm(
 
     let vcpus;
     let intc: IrqChip;
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    let mut fwcfg: Option<Arc<Mutex<devices::legacy::FwCfg>>> = None;
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
@@ -923,6 +925,24 @@ pub fn build_microvm(
             event_manager,
             _shutdown_efd,
         )?;
+
+        // KRUN_ACPI=1 (EFI boots only): a fw_cfg device carrying ACPI tables.
+        // The EDK2 build libkrun boots installs tables from it, and without
+        // them ACPI-only guests (e.g. Nanos) cannot find the GIC or their
+        // devices. Opt-in via env — like KRUN_PVH — because surprise ACPI
+        // changes how DT-capable guests (FreeBSD!) enumerate hardware, and
+        // the default boot path must stay byte-identical. The device
+        // registers empty here (so it lands on the bus and in the FDT); the
+        // blobs are built in `Vmm::configure_system`, once every virtio
+        // device is attached and vCPU MPIDRs are known.
+        if vm_resources.firmware_config.is_some() && std::env::var_os("KRUN_ACPI").is_some() {
+            let dev = Arc::new(Mutex::new(devices::legacy::FwCfg::new()));
+            mmio_device_manager
+                .register_mmio_fwcfg(dev.clone())
+                .map_err(Error::RegisterMMIODevice)
+                .map_err(StartMicrovmError::Internal)?;
+            fwcfg = Some(dev);
+        }
     }
 
     #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
@@ -964,6 +984,8 @@ pub fn build_microvm(
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        fwcfg,
     };
 
     // Set raw mode for FDs that are connected to legacy serial devices.

@@ -49,6 +49,9 @@ pub enum DeviceType {
     /// Device Type: RTC.
     #[cfg(target_arch = "aarch64")]
     RTC,
+    /// Device Type: QEMU fw_cfg (carries ACPI tables to the EFI firmware).
+    #[cfg(target_arch = "aarch64")]
+    FwCfg,
 }
 
 impl fmt::Display for DeviceType {
