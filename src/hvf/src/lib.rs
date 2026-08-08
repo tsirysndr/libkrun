@@ -209,6 +209,24 @@ pub fn vcpu_set_pending_irq(
     }
 }
 
+/// The vtimer offset every vCPU in this VM is started with: the host counter
+/// sampled once, so `CNTVCT_EL0` reads ~0 in the guest at boot.
+///
+/// `mach_absolute_time()` is the right source, and reading `CNTVCT_EL0` here is
+/// not: macOS virtualizes that register for EL0, presenting a 1 GHz timebase on
+/// an epoch of its own, while the guest sees the real 24 MHz counter running
+/// since the machine powered on. Subtracting one from the other is meaningless
+/// — it leaves the reported uptime off by days, which is the bug this exists to
+/// fix.
+///
+/// Sampled lazily on first use (VM start) and shared, so vCPUs that come up
+/// later — secondaries brought online by PSCI, long after the boot CPU — see the
+/// same timeline rather than each restarting the clock at zero.
+fn vtimer_offset() -> u64 {
+    static OFFSET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(|| unsafe { mach_absolute_time() })
+}
+
 pub fn vcpu_set_vtimer_mask(vcpuid: u64, masked: bool) -> Result<(), Error> {
     let ret = unsafe { hv_vcpu_set_vtimer_mask(vcpuid, masked) };
 
@@ -480,6 +498,23 @@ impl HvfVcpu<'_> {
         }
 
         let ret = unsafe { hv_vcpu_set_reg(self.vcpuid, hv_reg_t_HV_REG_X0, fdt_addr) };
+        if ret != HV_SUCCESS {
+            return Err(Error::VcpuInitialRegisters);
+        }
+
+        // Start the guest's virtual counter near zero.
+        //
+        // CNTVCT_EL0 is the physical counter minus the vtimer offset, and HVF
+        // leaves that offset at 0 — so without this the guest reads the host's
+        // counter, which has been running since the machine powered on. A guest
+        // that treats CNTVCT_EL0 as "nanoseconds since I booted" (OSv does
+        // exactly that: uptime() is CNTVCT_EL0 * 1e9 / CNTFRQ_EL0) then reports
+        // an uptime of days at its first instruction. KVM zeroes CNTVOFF_EL2
+        // for the same reason; this is the HVF spelling of it.
+        //
+        // Every vCPU gets the *same* offset, or their clocks would disagree by
+        // however long each took to come up.
+        let ret = unsafe { hv_vcpu_set_vtimer_offset(self.vcpuid, vtimer_offset()) };
         if ret != HV_SUCCESS {
             return Err(Error::VcpuInitialRegisters);
         }
