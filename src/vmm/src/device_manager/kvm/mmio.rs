@@ -244,15 +244,23 @@ impl MMIODeviceManager {
             .insert(serial, self.mmio_base, MMIO_LEN)
             .map_err(Error::BusError)?;
 
-        cmdline
-            .insert(
-                "earlycon",
-                #[cfg(target_arch = "aarch64")]
-                &format!("pl011,mmio32,0x{:08x}", self.mmio_base),
-                #[cfg(target_arch = "riscv64")]
-                &format!("uart,mmio,0x{:08x}", self.mmio_base),
-            )
-            .map_err(Error::Cmdline)?;
+        // Linux reads `earlycon=` to bring up its early console; OSv, and any
+        // other guest that hands the kernel command line to the application as
+        // argv, sees it as a stray argument instead — enough to make a program
+        // that parses its own arguments (redis-server reading a config, say)
+        // fail on a directive nobody wrote. KRUN_NO_EARLYCON=1 leaves it out;
+        // the console itself is unaffected, only the cmdline hint.
+        if std::env::var_os("KRUN_NO_EARLYCON").is_none() {
+            cmdline
+                .insert(
+                    "earlycon",
+                    #[cfg(target_arch = "aarch64")]
+                    &format!("pl011,mmio32,0x{:08x}", self.mmio_base),
+                    #[cfg(target_arch = "riscv64")]
+                    &format!("uart,mmio,0x{:08x}", self.mmio_base),
+                )
+                .map_err(Error::Cmdline)?;
+        }
 
         let ret = self.mmio_base;
         self.id_to_dev_info.insert(
