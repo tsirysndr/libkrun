@@ -160,6 +160,22 @@ impl InterruptTransport {
             warn!(target: &self.0.log_target, "Failed to signal config change: {e:?}");
         }
     }
+
+    /// Guest ack (InterruptACK write): clear the acked ISR bits and, when no
+    /// cause remains, de-assert the line. On level irqchips (in-kernel
+    /// hv_gic) `try_signal` leaves the SPI high; the ack is the only point
+    /// where the device knows the guest has consumed it. Re-raise if a signal
+    /// raced in between the clear and the de-assert.
+    pub fn ack(&self, mask: u32) {
+        let prev = self.status().fetch_and(!(mask as usize), Ordering::SeqCst);
+        if prev & !(mask as usize) == 0 {
+            let intc = self.intc().lock().unwrap();
+            intc.clear_irq(self.0.irq_line);
+            if self.status().load(Ordering::SeqCst) != 0 {
+                let _ = intc.set_irq(self.0.irq_line, Some(&self.0.event));
+            }
+        }
+    }
 }
 
 impl MmioTransport {
@@ -480,9 +496,7 @@ impl BusDevice for MmioTransport {
                     }
                     0x64 => {
                         if self.check_device_status(device_status::DRIVER_OK, 0) {
-                            self.interrupt
-                                .status()
-                                .fetch_and(!(v as usize), Ordering::SeqCst);
+                            self.interrupt.ack(v);
                         }
                     }
                     0x70 => self.set_device_status(v),

@@ -148,6 +148,18 @@ impl IrqChipT for HvfGicV3 {
             )))
         }
     }
+
+    fn clear_irq(&self, irq_line: Option<u32>) {
+        // hv_gic_set_spi is a real level: without this de-assert the SPI stays
+        // high after the guest's first ack and the in-kernel GIC redelivers it
+        // forever (tens of thousands of empty-ISR interrupts per second).
+        if let Some(irq_line) = irq_line {
+            let ret = unsafe { (self.bindings.hv_gic_set_spi)(irq_line, false) };
+            if ret != HV_SUCCESS {
+                log::warn!("HVF returned error when clearing SPI {irq_line}");
+            }
+        }
+    }
 }
 
 impl BusDevice for HvfGicV3 {

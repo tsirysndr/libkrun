@@ -35,6 +35,10 @@ impl IrqChipDevice {
     ) -> Result<(), DeviceError> {
         self.inner.set_irq(irq_line, interrupt_evt)
     }
+
+    pub fn clear_irq(&self, irq_line: Option<u32>) {
+        self.inner.clear_irq(irq_line)
+    }
 }
 
 impl BusDevice for IrqChipDevice {
@@ -121,6 +125,14 @@ pub trait IrqChipT: BusDevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
+    /// De-assert a level interrupt. Only meaningful for irqchips whose lines
+    /// are real levels (the in-kernel hv_gic): `set_irq` raises the SPI and
+    /// the guest's device-level ack (e.g. virtio-mmio InterruptACK) is the
+    /// only signal that the source is quiesced - without this, the line
+    /// stays high and the first interrupt becomes an interrupt storm. The
+    /// queue-based userspace models deliver edges, so their default is a
+    /// no-op.
+    fn clear_irq(&self, _irq_line: Option<u32>) {}
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -132,6 +144,14 @@ pub trait IrqChipT: BusDevice + GICDevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
+    /// De-assert a level interrupt. Only meaningful for irqchips whose lines
+    /// are real levels (the in-kernel hv_gic): `set_irq` raises the SPI and
+    /// the guest's device-level ack (e.g. virtio-mmio InterruptACK) is the
+    /// only signal that the source is quiesced - without this, the line
+    /// stays high and the first interrupt becomes an interrupt storm. The
+    /// queue-based userspace models deliver edges, so their default is a
+    /// no-op.
+    fn clear_irq(&self, _irq_line: Option<u32>) {}
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -143,6 +163,14 @@ pub trait IrqChipT: BusDevice + AIADevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
+    /// De-assert a level interrupt. Only meaningful for irqchips whose lines
+    /// are real levels (the in-kernel hv_gic): `set_irq` raises the SPI and
+    /// the guest's device-level ack (e.g. virtio-mmio InterruptACK) is the
+    /// only signal that the source is quiesced - without this, the line
+    /// stays high and the first interrupt becomes an interrupt storm. The
+    /// queue-based userspace models deliver edges, so their default is a
+    /// no-op.
+    fn clear_irq(&self, _irq_line: Option<u32>) {}
 }
 
 #[cfg(any(test, feature = "test_utils"))]
