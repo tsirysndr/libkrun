@@ -1487,7 +1487,7 @@ impl FileSystem for PassthroughFs {
         // Safe because this doesn't modify any memory and we check the return value.
         // TODO: Switch to libc::renameat2 once https://github.com/rust-lang/libc/pull/1508 lands
         // and we have glibc 2.28.
-        let res = unsafe {
+        let do_rename = || unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
                 old_inode.file.as_raw_fd(),
@@ -1497,10 +1497,64 @@ impl FileSystem for PassthroughFs {
                 flags,
             )
         };
-        if res == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
+        if do_rename() == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EACCES) {
+            return Err(err);
+        }
+
+        // The guest's root expects CAP_DAC_OVERRIDE semantics, but this server
+        // runs as an unprivileged host user, and Linux refuses to move a
+        // directory its caller cannot write (the `..` entry has to be
+        // rewritten). A read-only directory we own is therefore made writable
+        // for this one rename and restored under its new name. Nix does exactly
+        // that for itself when it is not root and skips it as root, which is
+        // how every substitution into /nix/store on a virtio-fs rootfs died
+        // with "renaming ...: Permission denied" on Linux hosts (macOS lets
+        // the owner rename such a directory, so it never showed there).
+        let mut st = MaybeUninit::<libc::stat64>::zeroed();
+        // Safe because the kernel only writes into `st` and we check the result.
+        let stat_res = unsafe {
+            libc::fstatat64(
+                old_inode.file.as_raw_fd(),
+                oldname.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if stat_res != 0 {
+            return Err(err);
+        }
+        // Safe because fstatat64 succeeded and initialised it.
+        let st = unsafe { st.assume_init() };
+        let is_our_readonly_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+            && st.st_uid == unsafe { libc::geteuid() }
+            && (st.st_mode & libc::S_IWUSR) == 0;
+        if !is_our_readonly_dir {
+            return Err(err);
+        }
+        let mode = st.st_mode & 0o7777;
+        // Safe because the paths are valid C strings and we check the results.
+        unsafe {
+            if libc::fchmodat(
+                old_inode.file.as_raw_fd(),
+                oldname.as_ptr(),
+                mode | libc::S_IWUSR,
+                0,
+            ) != 0
+            {
+                return Err(err);
+            }
+            if do_rename() == 0 {
+                // Best effort: the rename itself is what the guest asked for.
+                libc::fchmodat(new_inode.file.as_raw_fd(), newname.as_ptr(), mode, 0);
+                return Ok(());
+            }
+            let retry_err = io::Error::last_os_error();
+            libc::fchmodat(old_inode.file.as_raw_fd(), oldname.as_ptr(), mode, 0);
+            Err(retry_err)
         }
     }
 
